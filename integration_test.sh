@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
+
+if ! command -v nc >/dev/null 2>&1; then
+  echo "nc is required"
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 is required"
+  exit 1
+fi
+
+if nc -h 2>&1 | grep -q -- ' -N'; then
+  NC_ARGS=(-N)
+else
+  NC_ARGS=(-q 1)
+fi
+
+send_json() {
+  local payload="$1"
+  printf '%s\n' "$payload" | nc "${NC_ARGS[@]}" 127.0.0.1 8080 | head -n1
+}
+
+json_get() {
+  local json="$1"
+  local path="$2"
+  python3 - "$json" "$path" <<'PY'
+import json
+import sys
+
+obj = json.loads(sys.argv[1])
+path = sys.argv[2]
+
+value = obj
+for part in path.split('.'):
+    if part == '':
+        continue
+    if isinstance(value, list):
+        value = value[int(part)]
+    elif isinstance(value, dict):
+        value = value.get(part)
+    else:
+        value = None
+
+if value is None:
+    print("null")
+elif isinstance(value, bool):
+    print("true" if value else "false")
+elif isinstance(value, (int, float)):
+    if isinstance(value, float) and value.is_integer():
+        print(int(value))
+    else:
+        print(value)
+elif isinstance(value, str):
+    print(value)
+else:
+    print(json.dumps(value, separators=(',', ':')))
+PY
+}
+
+assert_eq() {
+  local actual="$1"
+  local expected="$2"
+  local message="$3"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "ASSERT FAILED: $message"
+    echo "  expected: $expected"
+    echo "  actual:   $actual"
+    exit 1
+  fi
+}
+
+assert_file_contains() {
+  local file="$1"
+  local needle="$2"
+  local message="$3"
+  if ! grep -q "$needle" "$file"; then
+    echo "ASSERT FAILED: $message"
+    echo "  needle: $needle"
+    echo "  file: $file"
+    exit 1
+  fi
+}
+
+echo "Compiling server..."
+if ! gcc -std=c11 -Wall -Wextra -O2 -o server server.c game_logic.c -lcjson; then
+  gcc -std=c11 -Wall -Wextra -O2 -o server server.c game_logic.c \
+    -L/lib/x86_64-linux-gnu -Wl,-rpath,/lib/x86_64-linux-gnu -Wl,-l:libcjson.so.1
+fi
+
+echo "Resetting data dir..."
+rm -rf data
+mkdir -p data
+
+cleanup() {
+  if [[ -n "${SERVER_PID:-}" ]]; then
+    kill "$SERVER_PID" >/dev/null 2>&1 || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+echo "Starting server..."
+./server > /tmp/clone_surround_server.log 2>&1 &
+SERVER_PID=$!
+sleep 0.3
+
+echo "[1/8] NEW_GAME size validation and seed check"
+resp=$(send_json '{"cmd":"NEW_GAME","size":2}')
+assert_eq "$(json_get "$resp" "ok")" "false" "NEW_GAME size<3 should fail"
+assert_eq "$(json_get "$resp" "error.code")" "INVALID_SIZE" "Expected INVALID_SIZE"
+
+resp=$(send_json '{"cmd":"NEW_GAME","size":5}')
+assert_eq "$(json_get "$resp" "ok")" "true" "NEW_GAME size=5 should pass"
+assert_eq "$(json_get "$resp" "role")" "X" "Creator role should be X"
+GAME_ID="$(json_get "$resp" "state.game_id")"
+X_TOKEN="$(json_get "$resp" "token")"
+assert_eq "$(json_get "$resp" "state.board.11")" "1" "Odd seed X position mismatch"
+assert_eq "$(json_get "$resp" "state.board.13")" "2" "Odd seed O position mismatch"
+
+GAME_FILE="data/game_${GAME_ID}.json"
+[[ -f "$GAME_FILE" ]] || { echo "Expected game file $GAME_FILE"; exit 1; }
+
+echo "[2/8] JOIN role assignment and spectator fallback"
+resp=$(send_json "{\"cmd\":\"JOIN_GAME\",\"game_id\":${GAME_ID}}")
+assert_eq "$(json_get "$resp" "ok")" "true" "JOIN_GAME should pass"
+assert_eq "$(json_get "$resp" "role")" "O" "Second join should become O"
+O_TOKEN="$(json_get "$resp" "token")"
+
+resp=$(send_json "{\"cmd\":\"JOIN_GAME\",\"game_id\":${GAME_ID}}")
+assert_eq "$(json_get "$resp" "ok")" "true" "Spectator join should pass"
+assert_eq "$(json_get "$resp" "role")" "SPECTATOR" "Third join should be spectator"
+assert_eq "$(json_get "$resp" "token")" "null" "Spectator should not get token"
+
+assert_file_contains "$GAME_FILE" '"status":"playing"' "Game should persist as playing after O joins"
+
+echo "[3/8] MOVE auth and turn checks"
+resp=$(send_json "{\"cmd\":\"MOVE\",\"game_id\":${GAME_ID},\"token\":\"badtoken\",\"direction\":0}")
+assert_eq "$(json_get "$resp" "ok")" "false" "Bad token move should fail"
+assert_eq "$(json_get "$resp" "error.code")" "UNAUTHORIZED" "Expected UNAUTHORIZED"
+
+resp=$(send_json "{\"cmd\":\"MOVE\",\"game_id\":${GAME_ID},\"token\":\"${O_TOKEN}\",\"direction\":0}")
+assert_eq "$(json_get "$resp" "ok")" "false" "Wrong-turn move should fail"
+assert_eq "$(json_get "$resp" "error.code")" "NOT_YOUR_TURN" "Expected NOT_YOUR_TURN"
+
+resp=$(send_json "{\"cmd\":\"MOVE\",\"game_id\":${GAME_ID},\"token\":\"${X_TOKEN}\",\"direction\":0}")
+assert_eq "$(json_get "$resp" "ok")" "true" "Valid X move should succeed"
+assert_eq "$(json_get "$resp" "state.active_player")" "O" "Turn should switch to O"
+
+resp=$(send_json "{\"cmd\":\"MOVE\",\"game_id\":${GAME_ID},\"token\":\"${X_TOKEN}\",\"direction\":0}")
+assert_eq "$(json_get "$resp" "ok")" "false" "Back-to-back X move should fail"
+assert_eq "$(json_get "$resp" "error.code")" "NOT_YOUR_TURN" "Expected NOT_YOUR_TURN"
+
+echo "[4/8] Capture-before-suicide deterministic scenario"
+cat > data/game_777.json <<'JSON'
+{"game_id":777,"size":3,"board":[1,1,1,1,2,1,1,1,0],"active_player":"X","x_token":"1111111111111111","o_token":"2222222222222222","x_disconnected":false,"o_disconnected":false,"status":"playing","winner":null,"finish_reason":null,"created_at":1,"updated_at":1}
+JSON
+
+resp=$(send_json '{"cmd":"MOVE","game_id":777,"token":"1111111111111111","direction":3}')
+assert_eq "$(json_get "$resp" "ok")" "true" "Custom move should succeed"
+assert_eq "$(json_get "$resp" "state.status")" "finished" "Custom game should finish"
+assert_eq "$(json_get "$resp" "state.winner")" "DRAW" "Both-zero fallback should be draw"
+assert_eq "$(json_get "$resp" "state.finish_reason")" "both_zero" "Expected both_zero reason"
+assert_eq "$(json_get "$resp" "state.board.0")" "0" "Board should be cleared by suicide removal"
+assert_eq "$(json_get "$resp" "state.board.8")" "0" "Board should be cleared by suicide removal"
+
+echo "[5/8] GET_STATE polling"
+resp=$(send_json "{\"cmd\":\"GET_STATE\",\"game_id\":${GAME_ID}}")
+assert_eq "$(json_get "$resp" "ok")" "true" "GET_STATE should succeed"
+assert_eq "$(json_get "$resp" "state.game_id")" "$GAME_ID" "GET_STATE game_id mismatch"
+
+echo "[6/8] QUIT_GAME finish behavior"
+resp=$(send_json "{\"cmd\":\"QUIT_GAME\",\"game_id\":${GAME_ID},\"token\":\"${O_TOKEN}\"}")
+assert_eq "$(json_get "$resp" "ok")" "true" "QUIT_GAME should succeed"
+assert_eq "$(json_get "$resp" "state.status")" "finished" "Game should be finished after quit"
+assert_eq "$(json_get "$resp" "state.winner")" "X" "If O quits, winner should be X"
+assert_eq "$(json_get "$resp" "state.finish_reason")" "quit" "Quit reason should be persisted"
+
+assert_file_contains "$GAME_FILE" '"status":"finished"' "Finished status should persist"
+assert_file_contains "$GAME_FILE" '"finish_reason":"quit"' "Quit reason should persist"
+
+echo "[7/8] Finished-game access restrictions"
+resp=$(send_json "{\"cmd\":\"MOVE\",\"game_id\":${GAME_ID},\"token\":\"${X_TOKEN}\",\"direction\":1}")
+assert_eq "$(json_get "$resp" "ok")" "false" "MOVE on finished game should fail"
+assert_eq "$(json_get "$resp" "error.code")" "GAME_FINISHED" "Expected GAME_FINISHED"
+
+resp=$(send_json "{\"cmd\":\"JOIN_GAME\",\"game_id\":${GAME_ID}}")
+assert_eq "$(json_get "$resp" "ok")" "false" "JOIN on finished game should fail"
+assert_eq "$(json_get "$resp" "error.code")" "GAME_FINISHED" "Expected GAME_FINISHED"
+
+resp=$(send_json "{\"cmd\":\"GET_STATE\",\"game_id\":${GAME_ID}}")
+assert_eq "$(json_get "$resp" "ok")" "true" "GET_STATE should work for finished game"
+
+echo "[8/8] Lazy-load from disk"
+cat > data/game_778.json <<'JSON'
+{"game_id":778,"size":3,"board":[1,0,2,0,1,0,2,0,1],"active_player":"O","x_token":"aaaaaaaaaaaaaaaa","o_token":"bbbbbbbbbbbbbbbb","x_disconnected":true,"o_disconnected":false,"status":"playing","winner":null,"finish_reason":null,"created_at":2,"updated_at":2}
+JSON
+
+resp=$(send_json '{"cmd":"GET_STATE","game_id":778}')
+assert_eq "$(json_get "$resp" "ok")" "true" "Lazy load GET_STATE should succeed"
+assert_eq "$(json_get "$resp" "state.active_player")" "O" "Lazy loaded active player mismatch"
+assert_eq "$(json_get "$resp" "state.board.2")" "2" "Lazy loaded board mismatch"
+
+echo "All integration checks passed."

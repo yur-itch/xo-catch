@@ -1,0 +1,153 @@
+## Project Goal
+
+Build a **turn-based, two-player Clone+Surround game** running on a **local server** with a **Raylib-based graphical client**. The game should support creating new games, joining games, making moves, quitting games (returning to menu), and persisting game state in **JSON files**, so the server does not need to recompute the entire move history on each request.
+
+---
+
+## Game Description
+
+* Two players: **X** and **O**.
+* Board: square grid of configurable size (e.g., 3×3 up to 25×25).
+* Rules (per move):
+
+  1. Player selects a **direction** (up, down, left, right).
+
+     * All four directions are **always valid**; moves that do nothing are allowed.
+  2. Each of their pieces clones along that direction if the path ends in an empty cell, skipping opponent pieces.
+  3. After placement, any **groups of opponent pieces with no liberties** are captured and converted to the moving player’s pieces.
+  4. After capturing opponent groups, **any groups of the moving player that now have no liberties are removed** (suicide is possible after capturing opponent pieces).
+  5. The turn switches to the other player.
+
+**Strategic note:**
+
+* Players must consider both **gaining territory by surrounding opponent groups** and **avoiding suicide of their own pieces**.
+
+* Large chain captures are possible, so moves that simultaneously trap multiple opponent groups can dramatically shift the board.
+
+* The moving player has an advantage because **captures are applied before checking for suicide**.
+
+* Game ends when a player quits or other defined conditions (optional: board full or one player eliminated).
+
+* The **board is stored as a 1D array** for simplicity and easy JSON serialization.
+
+---
+
+## Server Logic
+
+**Responsibilities:**
+
+1. **Game Management**
+
+   * Generate a unique game ID for each new game.
+   * Store **current board state** (1D array), **active player**, and **player IDs**.
+   * Create a **JSON file per game** in the executable’s directory, e.g., `game_<id>.json`.
+   * Keep track of game status: waiting, playing, finished.
+
+2. **Player Management**
+
+   * Allow players to **join** an existing game.
+   * Allow players to **quit**; quitting **returns the client to the menu**, does not exit the program.
+
+3. **Move Handling**
+
+   * Accept move requests from players with the **game ID** and **direction**.
+   * Apply the **clone + capture logic** in the following order:
+
+     1. Capture opponent groups with no liberties.
+     2. Remove any of the moving player’s own groups that now have no liberties (suicide check).
+   * Update the JSON file storing the game state.
+   * Return the **full game state** to the client, including:
+
+     * `game_id`
+     * board array (1D)
+     * active player
+     * players
+     * status
+
+4. **Communication**
+
+   * Use **local sockets or simple HTTP-like requests** for communication with clients.
+   * Endpoints and behaviors:
+
+     * `NEW_GAME` → creates new game, returns **full game state** including ID.
+     * `JOIN_GAME <id>` → adds player to game, returns **full game state** including ID.
+     * `MOVE <id> <player> <direction>` → applies move, returns **updated game state** including ID.
+     * `QUIT_GAME <id> <player>` → marks player as quit, returns client to menu with updated state.
+   * **No validation** is necessary for moves; all four directions are always valid.
+
+5. **Persistence**
+
+   * Each JSON file stores:
+
+     * Board array (1D)
+     * Active player
+     * Player IDs
+     * Status (waiting, playing, finished)
+   * Files are updated incrementally; the server does **not replay all moves** from scratch.
+
+---
+
+## User (Client) UI/UX
+
+**Responsibilities:**
+
+1. **Game Menu**
+
+   * Option to **create a new game** → requests server, receives game state including ID.
+   * Option to **join an existing game** → enters game ID, receives game state including ID.
+   * Option to **quit a game** → returns to menu (does not exit program).
+
+2. **Board Display**
+
+   * Render the current board **graphically using Raylib**.
+   * Show which player’s turn it is.
+   * All moves are valid; **no move highlighting** is necessary.
+
+3. **Move Input**
+
+   * Accept **direction input** (arrow keys or WASD).
+   * Send move request to server.
+   * Wait for server confirmation before allowing the next input.
+
+4. **Game Feedback**
+
+   * Display updates after opponent moves.
+   * Display captured pieces.
+   * Indicate if a player has won, lost, or quit.
+   * Allow players to **plan strategic captures** and avoid suicide.
+
+---
+
+## Implementation Notes (C Language)
+
+* **Server**
+
+  * Use **POSIX sockets** or simple TCP/UDP to accept client requests.
+  * Use **file I/O with JSON serialization** to save/load game state.
+  * Store board as a **1D array**.
+  * Implement **clone + capture logic** in separate functions that enforce the **capture-before-suicide rule**.
+
+* **Client**
+
+  * Use **Raylib** for graphics and input.
+  * Handle input, send requests to the server, render responses.
+  * Poll or request state updates to synchronize with opponent moves.
+
+* **General**
+
+  * Define constants for board size, colors, players, and directions.
+  * Ensure **thread-safe or file-locking** logic if multiple moves might arrive simultaneously.
+  * Use modular design: separate **network**, **game logic**, and **UI** modules.
+
+---
+
+**End Goal:**
+
+A local C-based server-client system where multiple users can:
+
+* Start games
+* Join games
+* Make moves turn by turn
+* Quit games (return to menu)
+* See updates in real time, with **persistent game state stored in JSON files**
+* Strategically **capture opponent groups while avoiding suicide**
