@@ -1,83 +1,12 @@
-# Clone+Surround Server Protocol (v1)
+# XO-catch Server Protocol (v1)
 
-## Build and Run
+## Scope
 
-Compile with manual gcc commands:
+This file documents the wire protocol only.
 
-```bash
-gcc -std=c11 -Wall -Wextra -O2 -o server server.c game_logic.c -lcjson
-```
-
-If your system has `libcjson.so.1` but no `libcjson.so` linker symlink, use:
-
-```bash
-gcc -std=c11 -Wall -Wextra -O2 -o server server.c game_logic.c \
-  -L/lib/x86_64-linux-gnu -Wl,-rpath,/lib/x86_64-linux-gnu -Wl,-l:libcjson.so.1
-```
-
-Run server:
-
-```bash
-./server
-```
-
-Default server bind is `127.0.0.1:8080` (local-machine only).
-
-Optional bind override:
-
-```bash
-./server [bind_ip] [port]
-```
-
-Examples:
-
-```bash
-./server 127.0.0.1 8080     # local-only (default behavior)
-./server 0.0.0.0 8080       # LAN-accessible on all interfaces
-./server 192.168.1.50 8080  # bind to one specific LAN interface
-```
+Build and run commands are maintained in `README`.
 
 The protocol transport is newline-delimited JSON (one JSON object per line).
-
-Compile client:
-
-```bash
-gcc -std=c11 -Wall -Wextra -O2 -o client client.c $(pkg-config --cflags --libs raylib) -lcjson
-```
-
-If your system has `libcjson.so.1` but no `libcjson.so` linker symlink, use:
-
-```bash
-gcc -std=c11 -Wall -Wextra -O2 -o client client.c $(pkg-config --cflags --libs raylib) \
-  -L/lib/x86_64-linux-gnu -Wl,-rpath,/lib/x86_64-linux-gnu -Wl,-l:libcjson.so.1
-```
-
-If your raylib is installed as a static library and `pkg-config --libs raylib` is not enough,
-add common Linux dependencies explicitly:
-
-```bash
-gcc -std=c11 -Wall -Wextra -O2 -o client client.c -I/usr/local/include -L/usr/local/lib -lraylib \
-  -L/lib/x86_64-linux-gnu -Wl,-rpath,/lib/x86_64-linux-gnu -Wl,-l:libcjson.so.1 \
-  -lm -lpthread -ldl -lrt -lX11 -lGL -lXrandr -lXi -lXcursor -lXinerama
-```
-
-Run client:
-
-```bash
-./client
-```
-
-Optional host/port override:
-
-```bash
-./client 127.0.0.1 8080
-```
-
-For LAN play, point clients to the server machine's LAN IP:
-
-```bash
-./client 192.168.1.50 8080
-```
 
 ## Transport and Envelopes
 
@@ -153,6 +82,7 @@ Rules:
 - Requires valid player token.
 - Requires correct turn.
 - Rejected if game is not `playing`.
+- If internal move application fails validation/allocation, server returns an error and leaves state unchanged.
 
 ### 4. GET_STATE
 
@@ -203,7 +133,7 @@ Rules:
 
 For each valid MOVE:
 1. Clone along direction (skipping opponent cells, place only on first empty landing cell).
-2. Convert opponent groups with no liberties to mover color.
+2. Remove opponent groups with no liberties (captured stones vanish to empty).
 3. Remove mover groups with no liberties to empty.
 4. Switch turn.
 5. Evaluate end conditions (elimination, full board, both-zero fail-safe draw).

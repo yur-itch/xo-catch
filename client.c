@@ -959,7 +959,7 @@ static void draw_board(const RemoteState *state, int top_y) {
 
 static void draw_menu(App *app, Rectangle minus_btn, Rectangle plus_btn, Rectangle create_btn,
                       Rectangle join_input_box, Rectangle join_btn, Rectangle exit_btn) {
-    DrawText("Clone + Surround", 40, 54, 34, DARKGRAY);
+    DrawText("XO-catch", 40, 54, 34, DARKGRAY);
 
     DrawText("Create Game", 120, 120, 24, DARKGRAY);
     DrawText("Board Size", 120, 158, 20, DARKGRAY);
@@ -1085,7 +1085,7 @@ int main(int argc, char **argv) {
     NetClient net;
     net_client_init(&net, host, port);
 
-    InitWindow(SCREEN_W, SCREEN_H, "Clone + Surround Client");
+    InitWindow(SCREEN_W, SCREEN_H, "XO-catch Client");
     SetTargetFPS(60);
 
     Rectangle minus_btn = {120, 188, 56, 56};

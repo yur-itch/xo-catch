@@ -8,6 +8,16 @@ typedef struct {
     int y;
 } Point;
 
+typedef struct {
+    bool *visited;
+    Point *stack;
+    Point *group;
+} FloodWorkspace;
+
+static const int NEIGHBOR_DIRS[4][2] = {
+    {1, 0}, {-1, 0}, {0, 1}, {0, -1}
+};
+
 static int idx_of(int x, int y, int size) {
     return y * size + x;
 }
@@ -18,6 +28,16 @@ static bool in_bounds(int x, int y, int size) {
 
 static int opponent_cell(int player_cell) {
     return player_cell == CELL_X ? CELL_O : CELL_X;
+}
+
+static bool is_valid_player_cell(int player_cell) {
+    return player_cell == CELL_X || player_cell == CELL_O;
+}
+
+static void set_error(GameLogicError *err_out, GameLogicError err) {
+    if (err_out != NULL) {
+        *err_out = err;
+    }
 }
 
 bool game_logic_is_valid_direction(int direction) {
@@ -45,9 +65,12 @@ void game_logic_seed_board(int *board, int size) {
     board[idx_of(x_o, y, size)] = CELL_O;
 }
 
-static void clone_move(int *board, int size, int player_cell, int dx, int dy) {
+static bool clone_move(int *board, int size, int player_cell, int dx, int dy) {
     int total = size * size;
     Point *placements = malloc(sizeof(Point) * (size_t)total);
+    if (placements == NULL) {
+        return false;
+    }
     int placement_count = 0;
     int opp = opponent_cell(player_cell);
 
@@ -82,6 +105,7 @@ static void clone_move(int *board, int size, int player_cell, int dx, int dy) {
     }
 
     free(placements);
+    return true;
 }
 
 static bool flood_group(
@@ -106,13 +130,9 @@ static bool flood_group(
         Point p = stack[--stack_top];
         group[(*group_size)++] = p;
 
-        const int dirs[4][2] = {
-            {1, 0}, {-1, 0}, {0, 1}, {0, -1}
-        };
-
         for (int d = 0; d < 4; ++d) {
-            int nx = p.x + dirs[d][0];
-            int ny = p.y + dirs[d][1];
+            int nx = p.x + NEIGHBOR_DIRS[d][0];
+            int ny = p.y + NEIGHBOR_DIRS[d][1];
 
             if (!in_bounds(nx, ny, size)) {
                 continue;
@@ -133,66 +153,49 @@ static bool flood_group(
     return has_liberty;
 }
 
-static void convert_captured_opponent_groups(int *board, int size, int mover_cell) {
+static void remove_trapped_groups_of_color_with_workspace(
+    int *board,
+    int size,
+    int color,
+    FloodWorkspace *ws
+) {
     int total = size * size;
-    bool *visited = calloc((size_t)total, sizeof(bool));
-    Point *stack = malloc(sizeof(Point) * (size_t)total);
-    Point *group = malloc(sizeof(Point) * (size_t)total);
-    int opponent = opponent_cell(mover_cell);
-
+    memset(ws->visited, 0, sizeof(bool) * (size_t)total);
     for (int y = 0; y < size; ++y) {
         for (int x = 0; x < size; ++x) {
             int id = idx_of(x, y, size);
-            if (visited[id] || board[id] != opponent) {
+            if (ws->visited[id] || board[id] != color) {
                 continue;
             }
 
             int group_size = 0;
-            bool has_liberty = flood_group(board, size, x, y, visited, stack, group, &group_size);
+            bool has_liberty = flood_group(board, size, x, y, ws->visited, ws->stack, ws->group, &group_size);
 
             if (!has_liberty) {
                 for (int i = 0; i < group_size; ++i) {
-                    board[idx_of(group[i].x, group[i].y, size)] = mover_cell;
+                    board[idx_of(ws->group[i].x, ws->group[i].y, size)] = CELL_EMPTY;
                 }
             }
         }
     }
-
-    free(visited);
-    free(stack);
-    free(group);
 }
 
-static void remove_dead_groups_of_color(int *board, int size, int color) {
-    int total = size * size;
-    bool *visited = calloc((size_t)total, sizeof(bool));
-    Point *stack = malloc(sizeof(Point) * (size_t)total);
-    Point *group = malloc(sizeof(Point) * (size_t)total);
+bool game_logic_apply_move(int *board, int size, int player_cell, int direction, GameLogicError *err_out) {
+    set_error(err_out, GAME_LOGIC_ERR_NONE);
 
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            int id = idx_of(x, y, size);
-            if (visited[id] || board[id] != color) {
-                continue;
-            }
-
-            int group_size = 0;
-            bool has_liberty = flood_group(board, size, x, y, visited, stack, group, &group_size);
-
-            if (!has_liberty) {
-                for (int i = 0; i < group_size; ++i) {
-                    board[idx_of(group[i].x, group[i].y, size)] = CELL_EMPTY;
-                }
-            }
-        }
+    if (board == NULL || size < 3 || size > 25) {
+        set_error(err_out, GAME_LOGIC_ERR_INVALID_ARGS);
+        return false;
+    }
+    if (!is_valid_player_cell(player_cell)) {
+        set_error(err_out, GAME_LOGIC_ERR_INVALID_PLAYER);
+        return false;
+    }
+    if (!game_logic_is_valid_direction(direction)) {
+        set_error(err_out, GAME_LOGIC_ERR_INVALID_DIRECTION);
+        return false;
     }
 
-    free(visited);
-    free(stack);
-    free(group);
-}
-
-void game_logic_apply_move(int *board, int size, int player_cell, int direction) {
     int dx = 0;
     int dy = 0;
 
@@ -210,12 +213,39 @@ void game_logic_apply_move(int *board, int size, int player_cell, int direction)
             dx = 1;
             break;
         default:
-            return;
+            set_error(err_out, GAME_LOGIC_ERR_INVALID_DIRECTION);
+            return false;
     }
 
-    clone_move(board, size, player_cell, dx, dy);
-    convert_captured_opponent_groups(board, size, player_cell);
-    remove_dead_groups_of_color(board, size, player_cell);
+    int total = size * size;
+    FloodWorkspace ws = {0};
+    ws.visited = calloc((size_t)total, sizeof(bool));
+    ws.stack = malloc(sizeof(Point) * (size_t)total);
+    ws.group = malloc(sizeof(Point) * (size_t)total);
+    if (ws.visited == NULL || ws.stack == NULL || ws.group == NULL) {
+        free(ws.visited);
+        free(ws.stack);
+        free(ws.group);
+        set_error(err_out, GAME_LOGIC_ERR_ALLOC);
+        return false;
+    }
+
+    bool cloned = clone_move(board, size, player_cell, dx, dy);
+    if (!cloned) {
+        free(ws.visited);
+        free(ws.stack);
+        free(ws.group);
+        set_error(err_out, GAME_LOGIC_ERR_ALLOC);
+        return false;
+    }
+
+    remove_trapped_groups_of_color_with_workspace(board, size, opponent_cell(player_cell), &ws);
+    remove_trapped_groups_of_color_with_workspace(board, size, player_cell, &ws);
+
+    free(ws.visited);
+    free(ws.stack);
+    free(ws.group);
+    return true;
 }
 
 void game_logic_count_cells(const int *board, int size, int *x_count, int *o_count, int *empty_count) {

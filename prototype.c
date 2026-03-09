@@ -1,14 +1,14 @@
 /*
-raylib_grid_clone_game.c
+raylib_grid_xo_catch_game.c
 
-Clone + Surround prototype using raylib.
+XO-catch prototype using raylib.
 
 Implemented:
 - Menu to select board size
 - Arrow-key moves (global directional clone move)
 - Player switching after each half-move
 - Flood-fill liberty detection
-- Surrounded groups convert to the player who just moved
+- Surrounded groups are removed (captured pieces vanish)
 
 Controls:
 Arrow Keys  : Perform move
@@ -16,7 +16,7 @@ ESC         : Return to menu
 Mouse click : "New Game" button
 
 Compile (Linux example):
-  gcc -o raylib_grid_clone_game raylib_grid_clone_game.c -lraylib -lm -lpthread -ldl -lrt -lX11
+  gcc -o raylib_grid_xo_catch_game raylib_grid_xo_catch_game.c -lraylib -lm -lpthread -ldl -lrt -lX11
 */
 
 #include "raylib.h"
@@ -178,7 +178,7 @@ static void CheckCaptures(Cell *board, int size, Player capturer)
 
 int main(void)
 {
-    InitWindow(SCREEN_W, SCREEN_H, "Clone + Surround Prototype");
+    InitWindow(SCREEN_W, SCREEN_H, "XO-catch Prototype");
     SetTargetFPS(60);
 
     GameState state = MENU;
@@ -293,7 +293,7 @@ int main(void)
 
         if (state == MENU)
         {
-            DrawText("Clone + Surround",40,30,30,DARKGRAY);
+            DrawText("XO-catch",40,30,30,DARKGRAY);
             DrawText("Board Size",120,100,20,DARKGRAY);
 
             DrawRectangleRec(minusBtn,LIGHTGRAY);

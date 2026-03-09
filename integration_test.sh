@@ -92,6 +92,50 @@ if ! gcc -std=c11 -Wall -Wextra -O2 -o server server.c game_logic.c -lcjson; the
     -L/lib/x86_64-linux-gnu -Wl,-rpath,/lib/x86_64-linux-gnu -Wl,-l:libcjson.so.1
 fi
 
+echo "Compiling game_logic API check helper..."
+cat > /tmp/game_logic_api_check.c <<'C'
+#include <stdio.h>
+#include "game_logic.h"
+
+static int check(bool cond, const char *msg) {
+  if (!cond) {
+    fprintf(stderr, "FAIL: %s\n", msg);
+    return 1;
+  }
+  return 0;
+}
+
+int main(void) {
+  int rc = 0;
+  int board[9] = {0};
+  board[4] = CELL_X;
+
+  GameLogicError err = GAME_LOGIC_ERR_NONE;
+  rc |= check(!game_logic_apply_move(NULL, 3, CELL_X, DIR_UP, &err), "NULL board should fail");
+  rc |= check(err == GAME_LOGIC_ERR_INVALID_ARGS, "NULL board error code");
+
+  err = GAME_LOGIC_ERR_NONE;
+  rc |= check(!game_logic_apply_move(board, 2, CELL_X, DIR_UP, &err), "size < 3 should fail");
+  rc |= check(err == GAME_LOGIC_ERR_INVALID_ARGS, "invalid size error code");
+
+  err = GAME_LOGIC_ERR_NONE;
+  rc |= check(!game_logic_apply_move(board, 3, 7, DIR_UP, &err), "invalid player should fail");
+  rc |= check(err == GAME_LOGIC_ERR_INVALID_PLAYER, "invalid player error code");
+
+  err = GAME_LOGIC_ERR_NONE;
+  rc |= check(!game_logic_apply_move(board, 3, CELL_X, 9, &err), "invalid direction should fail");
+  rc |= check(err == GAME_LOGIC_ERR_INVALID_DIRECTION, "invalid direction error code");
+
+  err = GAME_LOGIC_ERR_NONE;
+  rc |= check(game_logic_apply_move(board, 3, CELL_X, DIR_UP, &err), "valid move should succeed");
+  rc |= check(err == GAME_LOGIC_ERR_NONE, "success should set no error");
+
+  return rc;
+}
+C
+gcc -std=c11 -Wall -Wextra -O2 -I. -o /tmp/game_logic_api_check /tmp/game_logic_api_check.c game_logic.c
+/tmp/game_logic_api_check
+
 echo "Resetting data dir..."
 rm -rf data
 mkdir -p data
@@ -105,7 +149,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Starting server..."
-./server > /tmp/clone_surround_server.log 2>&1 &
+./server > /tmp/xo_catch_server.log 2>&1 &
 SERVER_PID=$!
 sleep 0.3
 
@@ -155,7 +199,7 @@ resp=$(send_json "{\"cmd\":\"MOVE\",\"game_id\":${GAME_ID},\"token\":\"${X_TOKEN
 assert_eq "$(json_get "$resp" "ok")" "false" "Back-to-back X move should fail"
 assert_eq "$(json_get "$resp" "error.code")" "NOT_YOUR_TURN" "Expected NOT_YOUR_TURN"
 
-echo "[4/8] Capture-before-suicide deterministic scenario"
+echo "[4/8] Capture-removal deterministic scenario"
 cat > data/game_777.json <<'JSON'
 {"game_id":777,"size":3,"board":[1,1,1,1,2,1,1,1,0],"active_player":"X","x_token":"1111111111111111","o_token":"2222222222222222","x_disconnected":false,"o_disconnected":false,"status":"playing","winner":null,"finish_reason":null,"created_at":1,"updated_at":1}
 JSON
@@ -163,10 +207,10 @@ JSON
 resp=$(send_json '{"cmd":"MOVE","game_id":777,"token":"1111111111111111","direction":3}')
 assert_eq "$(json_get "$resp" "ok")" "true" "Custom move should succeed"
 assert_eq "$(json_get "$resp" "state.status")" "finished" "Custom game should finish"
-assert_eq "$(json_get "$resp" "state.winner")" "DRAW" "Both-zero fallback should be draw"
-assert_eq "$(json_get "$resp" "state.finish_reason")" "both_zero" "Expected both_zero reason"
-assert_eq "$(json_get "$resp" "state.board.0")" "0" "Board should be cleared by suicide removal"
-assert_eq "$(json_get "$resp" "state.board.8")" "0" "Board should be cleared by suicide removal"
+assert_eq "$(json_get "$resp" "state.winner")" "X" "Captured O should vanish; X wins by elimination"
+assert_eq "$(json_get "$resp" "state.finish_reason")" "elimination" "Expected elimination reason"
+assert_eq "$(json_get "$resp" "state.board.4")" "0" "Captured surrounded O should be removed"
+assert_eq "$(json_get "$resp" "state.board.8")" "1" "New cloned X should remain on board"
 
 echo "[5/8] GET_STATE polling"
 resp=$(send_json "{\"cmd\":\"GET_STATE\",\"game_id\":${GAME_ID}}")

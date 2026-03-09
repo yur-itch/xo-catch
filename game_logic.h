@@ -12,11 +12,19 @@
 #define DIR_LEFT 2
 #define DIR_RIGHT 3
 
+typedef enum {
+    GAME_LOGIC_ERR_NONE = 0,
+    GAME_LOGIC_ERR_INVALID_ARGS,
+    GAME_LOGIC_ERR_INVALID_DIRECTION,
+    GAME_LOGIC_ERR_INVALID_PLAYER,
+    GAME_LOGIC_ERR_ALLOC
+} GameLogicError;
+
 bool game_logic_is_valid_direction(int direction);
 
 void game_logic_seed_board(int *board, int size);
 
-void game_logic_apply_move(int *board, int size, int player_cell, int direction);
+bool game_logic_apply_move(int *board, int size, int player_cell, int direction, GameLogicError *err_out);
 
 void game_logic_count_cells(const int *board, int size, int *x_count, int *o_count, int *empty_count);
 

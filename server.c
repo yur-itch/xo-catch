@@ -623,6 +623,22 @@ static void evaluate_end_conditions(Game *game) {
     }
 }
 
+static cJSON *make_game_logic_error_response(GameLogicError err, const Game *game) {
+    switch (err) {
+        case GAME_LOGIC_ERR_INVALID_ARGS:
+            return make_error_response("GAME_LOGIC_INVALID_ARGS", "Invalid board/size passed to game logic", game);
+        case GAME_LOGIC_ERR_INVALID_DIRECTION:
+            return make_error_response("GAME_LOGIC_INVALID_DIRECTION", "Invalid direction passed to game logic", game);
+        case GAME_LOGIC_ERR_INVALID_PLAYER:
+            return make_error_response("GAME_LOGIC_INVALID_PLAYER", "Invalid player passed to game logic", game);
+        case GAME_LOGIC_ERR_ALLOC:
+            return make_error_response("SERVER_ERROR", "Game logic allocation failure", game);
+        case GAME_LOGIC_ERR_NONE:
+        default:
+            return make_error_response("SERVER_ERROR", "Unknown game logic failure", game);
+    }
+}
+
 static Game *create_new_game(int size, int creator_fd) {
     Game *game = calloc(1, sizeof(Game));
     if (game == NULL) {
@@ -821,7 +837,10 @@ static cJSON *handle_move(cJSON *request) {
     }
 
     int cell = role == ROLE_X ? CELL_X : CELL_O;
-    game_logic_apply_move(game->board, game->size, cell, direction);
+    GameLogicError logic_err = GAME_LOGIC_ERR_NONE;
+    if (!game_logic_apply_move(game->board, game->size, cell, direction, &logic_err)) {
+        return make_game_logic_error_response(logic_err, game);
+    }
 
     game->active_player = (role == ROLE_X) ? ROLE_O : ROLE_X;
     evaluate_end_conditions(game);
@@ -1121,7 +1140,7 @@ int main(int argc, char **argv) {
         clients[i].len = 0;
     }
 
-    printf("Clone+Surround server listening on %s:%d\n", g_listen_ip, g_listen_port);
+    printf("XO-catch server listening on %s:%d\n", g_listen_ip, g_listen_port);
 
     while (1) {
         fd_set read_set;
