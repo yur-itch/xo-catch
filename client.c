@@ -1086,6 +1086,7 @@ int main(int argc, char **argv) {
     net_client_init(&net, host, port);
 
     InitWindow(SCREEN_W, SCREEN_H, "XO-catch Client");
+    SetExitKey(KEY_NULL);
     SetTargetFPS(60);
 
     Rectangle minus_btn = {120, 188, 56, 56};

@@ -289,8 +289,8 @@ static bool save_game(const Game *game) {
     size_t written = fwrite(encoded, 1, expected, fp);
     free(encoded);
 
-    if (written != expected || fclose(fp) != 0) {
-        fclose(fp);
+    int close_rc = fclose(fp);
+    if (written != expected || close_rc != 0) {
         return false;
     }
 
@@ -508,11 +508,44 @@ static cJSON *make_error_response(const char *code, const char *message, const G
     return response;
 }
 
+static cJSON *err_invalid_number_field(const char *field) {
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Field '%s' must be a number", field);
+    return make_error_response("INVALID_REQUEST", msg, NULL);
+}
+
+static cJSON *err_invalid_string_field(const char *field) {
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Field '%s' must be a string", field);
+    return make_error_response("INVALID_REQUEST", msg, NULL);
+}
+
+static cJSON *err_game_not_found(void) {
+    return make_error_response("GAME_NOT_FOUND", "No game exists with that game_id", NULL);
+}
+
+static cJSON *err_game_finished(const Game *game) {
+    return make_error_response("GAME_FINISHED", "Finished games accept only GET_STATE", game);
+}
+
+static cJSON *err_persist_failed(const Game *game) {
+    return make_error_response("SERVER_ERROR", "Failed to persist game", game);
+}
+
 static cJSON *make_state_ok_response(const Game *game) {
     cJSON *response = cJSON_CreateObject();
     cJSON_AddBoolToObject(response, "ok", true);
     cJSON_AddItemToObject(response, "state", game_to_json_state(game));
     return response;
+}
+
+static bool persist_touched_game(Game *game) {
+    touch_game(game);
+    if (!save_game(game)) {
+        fprintf(stderr, "Failed to persist game #%d\n", game->game_id);
+        return false;
+    }
+    return true;
 }
 
 static bool send_all(int fd, const char *data, size_t len) {
@@ -639,6 +672,21 @@ static cJSON *make_game_logic_error_response(GameLogicError err, const Game *gam
     }
 }
 
+static cJSON *get_game_by_id_from_request(cJSON *request, Game **out_game) {
+    int game_id = 0;
+    if (!get_required_int(request, "game_id", &game_id)) {
+        return err_invalid_number_field("game_id");
+    }
+
+    Game *game = get_game_or_load(game_id);
+    if (game == NULL) {
+        return err_game_not_found();
+    }
+
+    *out_game = game;
+    return NULL;
+}
+
 static Game *create_new_game(int size, int creator_fd) {
     Game *game = calloc(1, sizeof(Game));
     if (game == NULL) {
@@ -682,7 +730,7 @@ static Game *create_new_game(int size, int creator_fd) {
 static cJSON *handle_new_game(cJSON *request, int client_fd) {
     int size = 0;
     if (!get_required_int(request, "size", &size)) {
-        return make_error_response("INVALID_REQUEST", "Field 'size' must be a number", NULL);
+        return err_invalid_number_field("size");
     }
 
     if (size < 3 || size > 25) {
@@ -695,7 +743,7 @@ static cJSON *handle_new_game(cJSON *request, int client_fd) {
     }
 
     if (!save_game(game)) {
-        return make_error_response("SERVER_ERROR", "Failed to persist game", game);
+        return err_persist_failed(game);
     }
 
     cJSON *response = make_state_ok_response(game);
@@ -705,18 +753,14 @@ static cJSON *handle_new_game(cJSON *request, int client_fd) {
 }
 
 static cJSON *handle_join_game(cJSON *request, int client_fd) {
-    int game_id = 0;
-    if (!get_required_int(request, "game_id", &game_id)) {
-        return make_error_response("INVALID_REQUEST", "Field 'game_id' must be a number", NULL);
-    }
-
-    Game *game = get_game_or_load(game_id);
-    if (game == NULL) {
-        return make_error_response("GAME_NOT_FOUND", "No game exists with that game_id", NULL);
+    Game *game = NULL;
+    cJSON *lookup_err = get_game_by_id_from_request(request, &game);
+    if (lookup_err != NULL) {
+        return lookup_err;
     }
 
     if (game->status == STATUS_FINISHED) {
-        return make_error_response("GAME_FINISHED", "Finished games accept only GET_STATE", game);
+        return err_game_finished(game);
     }
 
     const char *token = get_optional_string(request, "token");
@@ -767,9 +811,8 @@ static cJSON *handle_join_game(cJSON *request, int client_fd) {
     }
 
     if (changed) {
-        touch_game(game);
-        if (!save_game(game)) {
-            return make_error_response("SERVER_ERROR", "Failed to persist game", game);
+        if (!persist_touched_game(game)) {
+            return err_persist_failed(game);
         }
     }
 
@@ -781,42 +824,36 @@ static cJSON *handle_join_game(cJSON *request, int client_fd) {
     return response;
 }
 
-static cJSON *handle_get_state(cJSON *request) {
-    int game_id = 0;
-    if (!get_required_int(request, "game_id", &game_id)) {
-        return make_error_response("INVALID_REQUEST", "Field 'game_id' must be a number", NULL);
-    }
-
-    Game *game = get_game_or_load(game_id);
-    if (game == NULL) {
-        return make_error_response("GAME_NOT_FOUND", "No game exists with that game_id", NULL);
+static cJSON *handle_get_state(cJSON *request, int client_fd) {
+    (void)client_fd;
+    Game *game = NULL;
+    cJSON *lookup_err = get_game_by_id_from_request(request, &game);
+    if (lookup_err != NULL) {
+        return lookup_err;
     }
 
     return make_state_ok_response(game);
 }
 
-static cJSON *handle_move(cJSON *request) {
-    int game_id = 0;
+static cJSON *handle_move(cJSON *request, int client_fd) {
+    (void)client_fd;
     int direction = -1;
     const char *token = NULL;
 
-    if (!get_required_int(request, "game_id", &game_id)) {
-        return make_error_response("INVALID_REQUEST", "Field 'game_id' must be a number", NULL);
+    Game *game = NULL;
+    cJSON *lookup_err = get_game_by_id_from_request(request, &game);
+    if (lookup_err != NULL) {
+        return lookup_err;
     }
     if (!get_required_string(request, "token", &token)) {
-        return make_error_response("INVALID_REQUEST", "Field 'token' must be a string", NULL);
+        return err_invalid_string_field("token");
     }
     if (!get_required_int(request, "direction", &direction)) {
-        return make_error_response("INVALID_REQUEST", "Field 'direction' must be a number", NULL);
-    }
-
-    Game *game = get_game_or_load(game_id);
-    if (game == NULL) {
-        return make_error_response("GAME_NOT_FOUND", "No game exists with that game_id", NULL);
+        return err_invalid_number_field("direction");
     }
 
     if (game->status == STATUS_FINISHED) {
-        return make_error_response("GAME_FINISHED", "Finished games accept only GET_STATE", game);
+        return err_game_finished(game);
     }
 
     if (game->status != STATUS_PLAYING) {
@@ -845,32 +882,28 @@ static cJSON *handle_move(cJSON *request) {
     game->active_player = (role == ROLE_X) ? ROLE_O : ROLE_X;
     evaluate_end_conditions(game);
 
-    touch_game(game);
-    if (!save_game(game)) {
-        return make_error_response("SERVER_ERROR", "Failed to persist game", game);
+    if (!persist_touched_game(game)) {
+        return err_persist_failed(game);
     }
 
     return make_state_ok_response(game);
 }
 
-static cJSON *handle_quit_game(cJSON *request) {
-    int game_id = 0;
+static cJSON *handle_quit_game(cJSON *request, int client_fd) {
+    (void)client_fd;
     const char *token = NULL;
 
-    if (!get_required_int(request, "game_id", &game_id)) {
-        return make_error_response("INVALID_REQUEST", "Field 'game_id' must be a number", NULL);
+    Game *game = NULL;
+    cJSON *lookup_err = get_game_by_id_from_request(request, &game);
+    if (lookup_err != NULL) {
+        return lookup_err;
     }
     if (!get_required_string(request, "token", &token)) {
-        return make_error_response("INVALID_REQUEST", "Field 'token' must be a string", NULL);
-    }
-
-    Game *game = get_game_or_load(game_id);
-    if (game == NULL) {
-        return make_error_response("GAME_NOT_FOUND", "No game exists with that game_id", NULL);
+        return err_invalid_string_field("token");
     }
 
     if (game->status == STATUS_FINISHED) {
-        return make_error_response("GAME_FINISHED", "Finished games accept only GET_STATE", game);
+        return err_game_finished(game);
     }
 
     int role = role_from_token(game, token);
@@ -892,9 +925,8 @@ static cJSON *handle_quit_game(cJSON *request) {
         }
     }
 
-    touch_game(game);
-    if (!save_game(game)) {
-        return make_error_response("SERVER_ERROR", "Failed to persist game", game);
+    if (!persist_touched_game(game)) {
+        return err_persist_failed(game);
     }
 
     return make_state_ok_response(game);
@@ -912,22 +944,32 @@ static cJSON *dispatch_request(const char *line, int client_fd) {
     const char *cmd = NULL;
     if (!get_required_string(request, "cmd", &cmd)) {
         cJSON_Delete(request);
-        return make_error_response("INVALID_REQUEST", "Field 'cmd' must be a string", NULL);
+        return err_invalid_string_field("cmd");
     }
 
-    cJSON *response = NULL;
+    typedef cJSON *(*CommandHandler)(cJSON *, int);
+    typedef struct {
+        const char *name;
+        CommandHandler handler;
+    } CommandEntry;
 
-    if (strcmp(cmd, "NEW_GAME") == 0) {
-        response = handle_new_game(request, client_fd);
-    } else if (strcmp(cmd, "JOIN_GAME") == 0) {
-        response = handle_join_game(request, client_fd);
-    } else if (strcmp(cmd, "MOVE") == 0) {
-        response = handle_move(request);
-    } else if (strcmp(cmd, "GET_STATE") == 0) {
-        response = handle_get_state(request);
-    } else if (strcmp(cmd, "QUIT_GAME") == 0) {
-        response = handle_quit_game(request);
-    } else {
+    static const CommandEntry commands[] = {
+        {"NEW_GAME", handle_new_game},
+        {"JOIN_GAME", handle_join_game},
+        {"MOVE", handle_move},
+        {"GET_STATE", handle_get_state},
+        {"QUIT_GAME", handle_quit_game},
+    };
+
+    cJSON *response = NULL;
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+        if (strcmp(cmd, commands[i].name) == 0) {
+            response = commands[i].handler(request, client_fd);
+            break;
+        }
+    }
+
+    if (response == NULL) {
         response = make_error_response("UNKNOWN_COMMAND", "Unsupported cmd", NULL);
     }
 
@@ -994,8 +1036,7 @@ static void update_disconnect_flags_for_fd(int fd) {
         }
 
         if (changed) {
-            touch_game(game);
-            save_game(game);
+            (void)persist_touched_game(game);
         }
 
         game = game->next;
@@ -1142,7 +1183,7 @@ int main(int argc, char **argv) {
 
     printf("XO-catch server listening on %s:%d\n", g_listen_ip, g_listen_port);
 
-    while (1) {
+    while (true) {
         fd_set read_set;
         FD_ZERO(&read_set);
         FD_SET(server_fd, &read_set);
