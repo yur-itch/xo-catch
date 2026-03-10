@@ -40,7 +40,9 @@
 #define MAX_BOARD_SIZE 25
 
 typedef enum {
-    APP_MENU = 0,
+    APP_MENU_MAIN = 0,
+    APP_MENU_CREATE,
+    APP_MENU_JOIN,
     APP_PLAYING
 } AppScreen;
 
@@ -681,13 +683,14 @@ static bool cmd_offer_draw(
 }
 
 static void reset_to_menu(App *app) {
-    app->screen = APP_MENU;
+    app->screen = APP_MENU_MAIN;
     app->role = CLIENT_ROLE_NONE;
     app->token[0] = '\0';
     app->game_id = 0;
     app->last_poll_time = 0.0;
     app->last_reconnect_attempt = 0.0;
     remote_state_clear(&app->state);
+    app->join_input_active = false;
 }
 
 static void apply_join_or_create_result(App *app, const ServerResponse *resp) {
@@ -904,11 +907,20 @@ static void try_submit_move(App *app, NetClient *net, int direction) {
     set_status(app, false, "Move accepted");
 }
 
-static void draw_status_bar(const App *app) {
-    Color bg = app->status_is_error ? (Color){150, 30, 30, 255} : (Color){36, 90, 56, 255};
-    DrawRectangle(0, 0, SCREEN_W, STATUS_BAR_H, bg);
+static void draw_status_bar(const App *app, const char *right_text) {
+    int screen_w = GetScreenWidth();
+    int half_w = screen_w / 2;
+    Color left_bg = app->status_is_error ? (Color){150, 30, 30, 255} : (Color){36, 90, 56, 255};
+    Color right_bg = (Color){30, 62, 102, 255};
+
+    DrawRectangle(0, 0, half_w, STATUS_BAR_H, left_bg);
+    DrawRectangle(half_w, 0, screen_w - half_w, STATUS_BAR_H, right_bg);
+
     DrawText(app->status_message[0] ? app->status_message : "Ready",
              12, 10, 16, RAYWHITE);
+    if (right_text != NULL && right_text[0] != '\0') {
+        DrawText(right_text, half_w + 12, 10, 16, RAYWHITE);
+    }
 }
 
 static void draw_board(const RemoteState *state, int top_y) {
@@ -917,9 +929,11 @@ static void draw_board(const RemoteState *state, int top_y) {
         return;
     }
 
+    int screen_w = GetScreenWidth();
+    int screen_h = GetScreenHeight();
     int margin_sides = 40;
-    int avail_w = SCREEN_W - margin_sides * 2;
-    int avail_h = SCREEN_H - top_y - 40;
+    int avail_w = screen_w - margin_sides * 2;
+    int avail_h = screen_h - top_y - 40;
     int cell_size = avail_w / state->size;
     if (cell_size * state->size > avail_h) {
         cell_size = avail_h / state->size;
@@ -929,7 +943,7 @@ static void draw_board(const RemoteState *state, int top_y) {
     }
 
     int board_w = cell_size * state->size;
-    int board_x = (SCREEN_W - board_w) / 2;
+    int board_x = (screen_w - board_w) / 2;
     int board_y = top_y;
 
     for (int y = 0; y < state->size; ++y) {
@@ -984,13 +998,30 @@ static void draw_board(const RemoteState *state, int top_y) {
     }
 }
 
-static void draw_menu(App *app, Rectangle minus_btn, Rectangle plus_btn, Rectangle create_btn,
-                      Rectangle join_input_box, Rectangle join_btn, Rectangle exit_btn) {
+static void draw_menu_main(App *app, Rectangle create_btn, Rectangle join_btn, Rectangle exit_btn,
+                           Rectangle fullscreen_btn) {
+    (void)app;
     DrawText("XO-catch", 40, 54, 34, DARKGRAY);
 
-    DrawText("Create Game", 120, 120, 24, DARKGRAY);
-    DrawText("Board Size", 120, 158, 20, DARKGRAY);
+    Color create_col = is_mouse_over(create_btn) ? DARKGREEN : GREEN;
+    DrawRectangleRec(create_btn, create_col);
+    DrawText("Create", (int)create_btn.x + 72, (int)create_btn.y + 16, 24, WHITE);
 
+    Color join_col = is_mouse_over(join_btn) ? DARKBLUE : BLUE;
+    DrawRectangleRec(join_btn, join_col);
+    DrawText("Join", (int)join_btn.x + 44, (int)join_btn.y + 16, 24, WHITE);
+
+    Color exit_col = is_mouse_over(exit_btn) ? MAROON : RED;
+    DrawRectangleRec(exit_btn, exit_col);
+    DrawText("Exit", (int)exit_btn.x + 94, (int)exit_btn.y + 16, 24, WHITE);
+
+    Color fs_col = is_mouse_over(fullscreen_btn) ? DARKBLUE : BLUE;
+    DrawRectangleRec(fullscreen_btn, fs_col);
+    DrawText("Fullscreen (F11)", (int)fullscreen_btn.x + 10, (int)fullscreen_btn.y + 6, 18, RAYWHITE);
+}
+
+static void draw_menu_create(App *app, Rectangle minus_btn, Rectangle plus_btn, Rectangle create_btn,
+                             Rectangle back_btn, Rectangle fullscreen_btn) {
     DrawRectangleRec(minus_btn, LIGHTGRAY);
     DrawText("-", (int)minus_btn.x + 20, (int)minus_btn.y + 8, 38, BLACK);
 
@@ -1004,7 +1035,17 @@ static void draw_menu(App *app, Rectangle minus_btn, Rectangle plus_btn, Rectang
     DrawRectangleRec(create_btn, create_col);
     DrawText("Create", (int)create_btn.x + 72, (int)create_btn.y + 16, 24, WHITE);
 
-    DrawText("Join Game", 120, 314, 24, DARKGRAY);
+    Color back_col = is_mouse_over(back_btn) ? DARKGRAY : GRAY;
+    DrawRectangleRec(back_btn, back_col);
+    DrawText("Back", (int)back_btn.x + 86, (int)back_btn.y + 16, 24, WHITE);
+
+    Color fs_col = is_mouse_over(fullscreen_btn) ? DARKBLUE : BLUE;
+    DrawRectangleRec(fullscreen_btn, fs_col);
+    DrawText("Fullscreen (F11)", (int)fullscreen_btn.x + 10, (int)fullscreen_btn.y + 6, 18, RAYWHITE);
+}
+
+static void draw_menu_join(App *app, Rectangle join_input_box, Rectangle join_btn,
+                           Rectangle back_btn, Rectangle fullscreen_btn) {
     Color input_bg = app->join_input_active ? (Color){255, 255, 255, 255} : (Color){245, 245, 245, 255};
     DrawRectangleRec(join_input_box, input_bg);
     DrawRectangleLinesEx(join_input_box, 2, app->join_input_active ? BLUE : GRAY);
@@ -1017,40 +1058,45 @@ static void draw_menu(App *app, Rectangle minus_btn, Rectangle plus_btn, Rectang
     DrawRectangleRec(join_btn, join_col);
     DrawText("Join", (int)join_btn.x + 44, (int)join_btn.y + 16, 24, WHITE);
 
-    Color exit_col = is_mouse_over(exit_btn) ? MAROON : RED;
-    DrawRectangleRec(exit_btn, exit_col);
-    DrawText("Exit", (int)exit_btn.x + 94, (int)exit_btn.y + 16, 24, WHITE);
+    Color back_col = is_mouse_over(back_btn) ? DARKGRAY : GRAY;
+    DrawRectangleRec(back_btn, back_col);
+    DrawText("Back", (int)back_btn.x + 86, (int)back_btn.y + 16, 24, WHITE);
+
+    Color fs_col = is_mouse_over(fullscreen_btn) ? DARKBLUE : BLUE;
+    DrawRectangleRec(fullscreen_btn, fs_col);
+    DrawText("Fullscreen (F11)", (int)fullscreen_btn.x + 10, (int)fullscreen_btn.y + 6, 18, RAYWHITE);
 }
 
-static void draw_gameplay(const App *app, Rectangle return_btn, Rectangle offer_draw_btn, Rectangle resign_btn) {
-    DrawText(TextFormat("Game #%d", app->game_id), 20, 46, 24, DARKGRAY);
-    DrawText(TextFormat("Role: %s", client_role_to_string(app->role)), 220, 50, 22, DARKGRAY);
+static void draw_gameplay(const App *app, Rectangle return_btn, Rectangle offer_draw_btn, Rectangle resign_btn,
+                          Rectangle fullscreen_btn) {
+    int screen_h = GetScreenHeight();
+    DrawRectangle(12, 38, GetScreenWidth() - 24, 34, (Color){235, 235, 235, 255});
+    DrawRectangleLinesEx((Rectangle){12, 38, (float)(GetScreenWidth() - 24), 34}, 1, LIGHTGRAY);
+    DrawText(TextFormat("#%d", app->game_id), 20, 46, 24, DARKGRAY);
+    DrawText(TextFormat("Role: %s", client_role_to_string(app->role)), 200, 50, 22, DARKGRAY);
 
     if (app->state.valid) {
         DrawText(TextFormat("Turn: %s", app->state.active_player), 420, 50, 22, BLACK);
         DrawText(TextFormat("Status: %s", app->state.status), 600, 50, 22, BLACK);
     }
 
-    if (app->role == CLIENT_ROLE_SPECTATOR) {
-        DrawRectangle(20, 84, SCREEN_W - 40, 32, (Color){30, 62, 102, 255});
-        DrawText("Spectator mode (read-only)", 34, 92, 18, RAYWHITE);
-    } else if (app->state.valid && strcmp(app->state.status, "waiting") == 0) {
-        DrawRectangle(20, 84, SCREEN_W - 40, 32, (Color){122, 96, 24, 255});
-        DrawText("Waiting for opponent to join...", 34, 92, 18, RAYWHITE);
-    }
+    Color fs_col = is_mouse_over(fullscreen_btn) ? DARKBLUE : BLUE;
+    DrawRectangleRec(fullscreen_btn, fs_col);
+    DrawText("Fullscreen (F11)", (int)fullscreen_btn.x + 10, (int)fullscreen_btn.y + 6, 18, RAYWHITE);
 
     draw_board(&app->state, 130);
 
-    DrawText("Move: Arrow keys or WASD", 20, SCREEN_H - 42, 18, DARKGRAY);
+    DrawText("Move: Arrow keys or WASD", 20, screen_h - 42, 18, DARKGRAY);
 
     if (app->role == CLIENT_ROLE_SPECTATOR) {
-        DrawText("ESC: return to menu", 20, SCREEN_H - 22, 16, GRAY);
+        DrawText("ESC: return to menu", 20, screen_h - 22, 16, GRAY);
     } else if (app->state.valid) {
         bool my_agree = (app->role == CLIENT_ROLE_X) ? app->state.x_agree_draw : app->state.o_agree_draw;
         bool opp_agree = (app->role == CLIENT_ROLE_X) ? app->state.o_agree_draw : app->state.x_agree_draw;
-        DrawText(TextFormat("Draw: you %s, opponent %s", my_agree ? "agreed" : "not agreed",
+        DrawText(TextFormat("Draw: you %s, opponent %s",
+                            my_agree ? "agreed" : "not agreed",
                             opp_agree ? "agreed" : "not agreed"),
-                 20, SCREEN_H - 22, 16, GRAY);
+                 20, screen_h - 22, 16, GRAY);
     }
 
     if (is_player_role(app->role) && app->state.valid && strcmp(app->state.status, "finished") != 0) {
@@ -1067,9 +1113,9 @@ static void draw_gameplay(const App *app, Rectangle return_btn, Rectangle offer_
     }
 
     if (app->state.valid && strcmp(app->state.status, "finished") == 0) {
-        DrawRectangle(0, 0, SCREEN_W, SCREEN_H, (Color){0, 0, 0, 120});
+        DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), (Color){0, 0, 0, 120});
 
-        Rectangle panel = {SCREEN_W / 2.0f - 230.0f, SCREEN_H / 2.0f - 130.0f, 460.0f, 260.0f};
+        Rectangle panel = {GetScreenWidth() / 2.0f - 230.0f, GetScreenHeight() / 2.0f - 130.0f, 460.0f, 260.0f};
         DrawRectangleRec(panel, RAYWHITE);
         DrawRectangleLinesEx(panel, 2, DARKGRAY);
 
@@ -1125,7 +1171,7 @@ int main(int argc, char **argv) {
 
     App app;
     memset(&app, 0, sizeof(app));
-    app.screen = APP_MENU;
+    app.screen = APP_MENU_MAIN;
     app.create_size = 9;
     app.role = CLIENT_ROLE_NONE;
     app.state.board = NULL;
@@ -1134,6 +1180,7 @@ int main(int argc, char **argv) {
     NetClient net;
     net_client_init(&net, host, port);
 
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(SCREEN_W, SCREEN_H, "XO-catch Client");
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
@@ -1142,67 +1189,118 @@ int main(int argc, char **argv) {
     Rectangle plus_btn = {344, 188, 56, 56};
     Rectangle create_btn = {120, 258, 280, 58};
 
-    Rectangle join_input_box = {120, 352, 280, 56};
-    Rectangle join_btn = {420, 352, 140, 56};
+    Rectangle join_input_box = {120, 198, 280, 56};
+    Rectangle join_action_btn = {120, 352, 280, 58};
+    Rectangle main_join_btn = {120, 352, 280, 58};
+    Rectangle back_btn = {120, 438, 280, 58};
     Rectangle exit_btn = {120, 438, 280, 58};
 
-    Rectangle finished_return_btn = {SCREEN_W / 2.0f - 130.0f, SCREEN_H / 2.0f + 56.0f, 260.0f, 58.0f};
-    Rectangle offer_draw_btn = {SCREEN_W - 360.0f, SCREEN_H - 30.0f, 180.0f, 30.0f};
-    Rectangle resign_btn = {SCREEN_W - 180.0f, SCREEN_H - 30.0f, 180.0f, 30.0f};
-
     while (!WindowShouldClose()) {
-        if (app.screen == APP_MENU) {
-            update_join_input(&app);
+        int screen_w = GetScreenWidth();
+        int screen_h = GetScreenHeight();
+        Rectangle finished_return_btn = {screen_w / 2.0f - 130.0f, screen_h / 2.0f + 56.0f, 260.0f, 58.0f};
+    Rectangle fullscreen_btn = {screen_w - 540.0f, screen_h - 30.0f, 180.0f, 30.0f};
+    Rectangle offer_draw_btn = {screen_w - 360.0f, screen_h - 30.0f, 180.0f, 30.0f};
+    Rectangle resign_btn = {screen_w - 180.0f, screen_h - 30.0f, 180.0f, 30.0f};
 
+        const char *right_status = "";
+        if (app.screen == APP_PLAYING) {
+            if (app.role == CLIENT_ROLE_SPECTATOR) {
+                right_status = "Spectator mode (read-only)";
+            } else if (app.state.valid && strcmp(app.state.status, "waiting") == 0) {
+                right_status = "Waiting for opponent to join...";
+            }
+        } else if (app.screen == APP_MENU_CREATE) {
+            right_status = "Menu: Create";
+        } else if (app.screen == APP_MENU_JOIN) {
+            right_status = "Menu: Join";
+        } else {
+            right_status = "Menu";
+        }
+
+        if (app.screen == APP_MENU_JOIN) {
+            update_join_input(&app);
+        } else {
+            app.join_input_active = false;
+        }
+
+        if (IsKeyPressed(KEY_F11)) {
+            ToggleFullscreen();
+        }
+
+        if (app.screen == APP_MENU_MAIN || app.screen == APP_MENU_CREATE || app.screen == APP_MENU_JOIN) {
             bool clicked = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
             if (clicked) {
-                if (is_mouse_over(join_input_box)) {
+                if (app.screen == APP_MENU_JOIN && is_mouse_over(join_input_box)) {
                     app.join_input_active = true;
                 } else {
                     app.join_input_active = false;
                 }
             }
 
-            if (clicked && is_mouse_over(minus_btn) && app.create_size > MIN_BOARD_SIZE) {
-                app.create_size--;
-            }
-            if (clicked && is_mouse_over(plus_btn) && app.create_size < MAX_BOARD_SIZE) {
-                app.create_size++;
-            }
-
-            if (clicked && is_mouse_over(create_btn)) {
-                ServerResponse resp;
-                char err[256];
-                if (!cmd_new_game(&net, app.create_size, &app.state, &resp, err, sizeof(err))) {
-                    set_status(&app, true, "NEW_GAME failed: %s", err);
-                } else if (!resp.ok) {
-                    set_status(&app, true, "NEW_GAME rejected: %s (%s)", resp.error_message, resp.error_code);
-                } else {
-                    apply_join_or_create_result(&app, &resp);
-                    set_status(&app, false, "Created game #%d as X", app.game_id);
+            if (app.screen == APP_MENU_MAIN) {
+                if (clicked && is_mouse_over(create_btn)) {
+                    app.screen = APP_MENU_CREATE;
                 }
-            }
-
-            if ((clicked && is_mouse_over(join_btn)) || (app.join_input_active && IsKeyPressed(KEY_ENTER))) {
-                int game_id = parse_join_game_id(app.join_input);
-                if (game_id <= 0) {
-                    set_status(&app, true, "Enter a valid numeric game ID");
-                } else {
+                if (clicked && is_mouse_over(main_join_btn)) {
+                    app.screen = APP_MENU_JOIN;
+                    app.join_input_active = true;
+                }
+                if (clicked && is_mouse_over(exit_btn)) {
+                    break;
+                }
+                if (clicked && is_mouse_over(fullscreen_btn)) {
+                    ToggleFullscreen();
+                }
+            } else if (app.screen == APP_MENU_CREATE) {
+                if (clicked && is_mouse_over(minus_btn) && app.create_size > MIN_BOARD_SIZE) {
+                    app.create_size--;
+                }
+                if (clicked && is_mouse_over(plus_btn) && app.create_size < MAX_BOARD_SIZE) {
+                    app.create_size++;
+                }
+                if (clicked && is_mouse_over(create_btn)) {
                     ServerResponse resp;
                     char err[256];
-                    if (!cmd_join_game(&net, game_id, NULL, &app.state, &resp, err, sizeof(err))) {
-                        set_status(&app, true, "JOIN_GAME failed: %s", err);
+                    if (!cmd_new_game(&net, app.create_size, &app.state, &resp, err, sizeof(err))) {
+                        set_status(&app, true, "NEW_GAME failed: %s", err);
                     } else if (!resp.ok) {
-                        set_status(&app, true, "JOIN_GAME rejected: %s (%s)", resp.error_message, resp.error_code);
+                        set_status(&app, true, "NEW_GAME rejected: %s (%s)", resp.error_message, resp.error_code);
                     } else {
                         apply_join_or_create_result(&app, &resp);
-                        set_status(&app, false, "Joined game #%d as %s", app.game_id, client_role_to_string(app.role));
+                        set_status(&app, false, "Created game #%d as X", app.game_id);
                     }
                 }
-            }
-
-            if (clicked && is_mouse_over(exit_btn)) {
-                break;
+                if (clicked && is_mouse_over(back_btn)) {
+                    app.screen = APP_MENU_MAIN;
+                }
+                if (clicked && is_mouse_over(fullscreen_btn)) {
+                    ToggleFullscreen();
+                }
+            } else if (app.screen == APP_MENU_JOIN) {
+                if ((clicked && is_mouse_over(join_action_btn)) || (app.join_input_active && IsKeyPressed(KEY_ENTER))) {
+                    int game_id = parse_join_game_id(app.join_input);
+                    if (game_id <= 0) {
+                        set_status(&app, true, "Enter a valid numeric game ID");
+                    } else {
+                        ServerResponse resp;
+                        char err[256];
+                        if (!cmd_join_game(&net, game_id, NULL, &app.state, &resp, err, sizeof(err))) {
+                            set_status(&app, true, "JOIN_GAME failed: %s", err);
+                        } else if (!resp.ok) {
+                            set_status(&app, true, "JOIN_GAME rejected: %s (%s)", resp.error_message, resp.error_code);
+                        } else {
+                            apply_join_or_create_result(&app, &resp);
+                            set_status(&app, false, "Joined game #%d as %s", app.game_id, client_role_to_string(app.role));
+                        }
+                    }
+                }
+                if (clicked && is_mouse_over(back_btn)) {
+                    app.screen = APP_MENU_MAIN;
+                }
+                if (clicked && is_mouse_over(fullscreen_btn)) {
+                    ToggleFullscreen();
+                }
             }
         } else if (app.screen == APP_PLAYING) {
             poll_game_state(&app, &net);
@@ -1272,17 +1370,25 @@ int main(int argc, char **argv) {
                 set_status(&app, false, "Returned to menu from finished game");
                 reset_to_menu(&app);
             }
+
+            if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && is_mouse_over(fullscreen_btn)) {
+                ToggleFullscreen();
+            }
         }
 
         BeginDrawing();
         ClearBackground(RAYWHITE);
 
-        draw_status_bar(&app);
+        draw_status_bar(&app, right_status);
 
-        if (app.screen == APP_MENU) {
-            draw_menu(&app, minus_btn, plus_btn, create_btn, join_input_box, join_btn, exit_btn);
+        if (app.screen == APP_MENU_MAIN) {
+            draw_menu_main(&app, create_btn, main_join_btn, exit_btn, fullscreen_btn);
+        } else if (app.screen == APP_MENU_CREATE) {
+            draw_menu_create(&app, minus_btn, plus_btn, create_btn, back_btn, fullscreen_btn);
+        } else if (app.screen == APP_MENU_JOIN) {
+            draw_menu_join(&app, join_input_box, join_action_btn, back_btn, fullscreen_btn);
         } else {
-            draw_gameplay(&app, finished_return_btn, offer_draw_btn, resign_btn);
+            draw_gameplay(&app, finished_return_btn, offer_draw_btn, resign_btn, fullscreen_btn);
         }
 
         EndDrawing();
