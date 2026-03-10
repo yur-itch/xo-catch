@@ -67,6 +67,8 @@ typedef struct Game {
 
     bool x_disconnected;
     bool o_disconnected;
+    bool x_agree_draw;
+    bool o_agree_draw;
     int x_conn_fd;
     int o_conn_fd;
 
@@ -243,6 +245,8 @@ static cJSON *game_to_json_state(const Game *game) {
 
     cJSON_AddBoolToObject(state, "x_disconnected", game->x_disconnected);
     cJSON_AddBoolToObject(state, "o_disconnected", game->o_disconnected);
+    cJSON_AddBoolToObject(state, "x_agree_draw", game->x_agree_draw);
+    cJSON_AddBoolToObject(state, "o_agree_draw", game->o_agree_draw);
 
     cJSON_AddStringToObject(state, "status", status_to_string(game->status));
 
@@ -442,8 +446,12 @@ static Game *load_game_from_disk(int game_id) {
 
     cJSON *x_disc_item = cJSON_GetObjectItemCaseSensitive(json, "x_disconnected");
     cJSON *o_disc_item = cJSON_GetObjectItemCaseSensitive(json, "o_disconnected");
+    cJSON *x_draw_item = cJSON_GetObjectItemCaseSensitive(json, "x_agree_draw");
+    cJSON *o_draw_item = cJSON_GetObjectItemCaseSensitive(json, "o_agree_draw");
     game->x_disconnected = cJSON_IsTrue(x_disc_item);
     game->o_disconnected = cJSON_IsTrue(o_disc_item);
+    game->x_agree_draw = cJSON_IsTrue(x_draw_item);
+    game->o_agree_draw = cJSON_IsTrue(o_draw_item);
 
     cJSON *status_item = cJSON_GetObjectItemCaseSensitive(json, "status");
     if (cJSON_IsString(status_item) && status_item->valuestring != NULL) {
@@ -623,6 +631,15 @@ static void set_game_finished(Game *game, int winner, const char *reason) {
     snprintf(game->finish_reason, sizeof(game->finish_reason), "%s", reason);
 }
 
+static void maybe_finish_by_draw_agreement(Game *game) {
+    if (game->status == STATUS_FINISHED) {
+        return;
+    }
+    if (game->x_agree_draw && game->o_agree_draw) {
+        set_game_finished(game, WINNER_DRAW, "draw_agreed");
+    }
+}
+
 static void evaluate_end_conditions(Game *game) {
     int x_count = 0;
     int o_count = 0;
@@ -713,6 +730,8 @@ static Game *create_new_game(int size, int creator_fd) {
 
     game->x_disconnected = false;
     game->o_disconnected = false;
+    game->x_agree_draw = false;
+    game->o_agree_draw = false;
     game->x_conn_fd = creator_fd;
     game->o_conn_fd = -1;
 
@@ -889,7 +908,7 @@ static cJSON *handle_move(cJSON *request, int client_fd) {
     return make_state_ok_response(game);
 }
 
-static cJSON *handle_quit_game(cJSON *request, int client_fd) {
+static cJSON *handle_resign_game(cJSON *request, int client_fd) {
     (void)client_fd;
     const char *token = NULL;
 
@@ -913,20 +932,66 @@ static cJSON *handle_quit_game(cJSON *request, int client_fd) {
 
     if (role == ROLE_X) {
         if (game->has_o) {
-            set_game_finished(game, WINNER_O, "quit");
+            set_game_finished(game, WINNER_O, "resign");
         } else {
-            set_game_finished(game, WINNER_DRAW, "quit");
+            set_game_finished(game, WINNER_DRAW, "resign");
         }
     } else {
         if (game->has_x) {
-            set_game_finished(game, WINNER_X, "quit");
+            set_game_finished(game, WINNER_X, "resign");
         } else {
-            set_game_finished(game, WINNER_DRAW, "quit");
+            set_game_finished(game, WINNER_DRAW, "resign");
         }
     }
 
     if (!persist_touched_game(game)) {
         return err_persist_failed(game);
+    }
+
+    return make_state_ok_response(game);
+}
+
+static cJSON *handle_offer_draw(cJSON *request, int client_fd) {
+    (void)client_fd;
+    const char *token = NULL;
+
+    Game *game = NULL;
+    cJSON *lookup_err = get_game_by_id_from_request(request, &game);
+    if (lookup_err != NULL) {
+        return lookup_err;
+    }
+    if (!get_required_string(request, "token", &token)) {
+        return err_invalid_string_field("token");
+    }
+
+    if (game->status == STATUS_FINISHED) {
+        return err_game_finished(game);
+    }
+
+    int role = role_from_token(game, token);
+    if (role != ROLE_X && role != ROLE_O) {
+        return make_error_response("UNAUTHORIZED", "Invalid player token", game);
+    }
+
+    bool changed = false;
+    if (role == ROLE_X) {
+        game->x_agree_draw = !game->x_agree_draw;
+        changed = true;
+    } else if (role == ROLE_O) {
+        game->o_agree_draw = !game->o_agree_draw;
+        changed = true;
+    }
+
+    int status_before = game->status;
+    maybe_finish_by_draw_agreement(game);
+    if (game->status != status_before) {
+        changed = true;
+    }
+
+    if (changed) {
+        if (!persist_touched_game(game)) {
+            return err_persist_failed(game);
+        }
     }
 
     return make_state_ok_response(game);
@@ -958,7 +1023,8 @@ static cJSON *dispatch_request(const char *line, int client_fd) {
         {"JOIN_GAME", handle_join_game},
         {"MOVE", handle_move},
         {"GET_STATE", handle_get_state},
-        {"QUIT_GAME", handle_quit_game},
+        {"RESIGN", handle_resign_game},
+        {"OFFER_DRAW", handle_offer_draw},
     };
 
     cJSON *response = NULL;

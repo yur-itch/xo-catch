@@ -18,7 +18,8 @@ The transport protocol is newline-delimited JSON (`one JSON object per line`).
 - Enforces token auth and turn order for `MOVE`
 - Validates internal move application and rejects failed logic calls without mutating game state
 - Supports polling via `GET_STATE`
-- Supports `QUIT_GAME` (finishes game with `finish_reason="quit"`)
+- Supports `RESIGN` (finishes game with `finish_reason="resign"`)
+- Supports `OFFER_DRAW` (finishes game with `finish_reason="draw_agreed"` when both players agree)
 - Tracks per-player disconnect flags (`x_disconnected`, `o_disconnected`)
 - Persists each game to `./data/game_<id>.json`
 - Lazy-loads games from disk when not yet loaded in memory
@@ -28,7 +29,7 @@ The transport protocol is newline-delimited JSON (`one JSON object per line`).
 
 - Menu UI: create game, join game by numeric id, exit application.
 - Gameplay UI: board rendering, current turn/status text, spectator banner, waiting banner, and finished overlay with winner/reason.
-- Controls: Arrow keys or `WASD` to move; `ESC` quits (players send `QUIT_GAME`) or returns to menu (spectators).
+- Controls: Arrow keys or `WASD` to move; `Resign` button resigns (players send `RESIGN`); `Offer Draw` button toggles draw agreement; `ESC` returns to menu (spectators).
 - Network behavior: periodic `GET_STATE` polling and reconnect/reclaim through `JOIN_GAME` with token after connection loss.
 
 ### Game Rules Implemented
@@ -46,7 +47,8 @@ End conditions currently implemented:
 - player elimination
 - full board (winner by piece count, or draw on tie)
 - both-zero fallback draw (`finish_reason="both_zero"`)
-- quit (`finish_reason="quit"`)
+- resign (`finish_reason="resign"`)
+- agreed draw (`finish_reason="draw_agreed"`)
 
 ## Build
 
@@ -120,7 +122,8 @@ Supported commands:
 - `JOIN_GAME`
 - `MOVE`
 - `GET_STATE`
-- `QUIT_GAME`
+- `RESIGN`
+- `OFFER_DRAW`
 
 The server returns full state snapshots in responses. The canonical protocol and field definitions are documented in `PROTOCOL.md`.
 
@@ -137,7 +140,7 @@ The server returns full state snapshots in responses. The canonical protocol and
 - validation and role assignment
 - move auth and turn enforcement
 - deterministic capture/suicide scenario
-- quit and finished-game restrictions
+- resign and finished-game restrictions
 - lazy-load from disk
 
 It does not automate Raylib UI behavior.

@@ -94,17 +94,30 @@ Request:
 
 Optional token is allowed but not required.
 
-### 5. QUIT_GAME
+### 5. RESIGN
 
 Request:
 
 ```json
-{"cmd":"QUIT_GAME","game_id":1,"token":"..."}
+{"cmd":"RESIGN","game_id":1,"token":"..."}
 ```
 
 Rules:
 - Valid player token required.
-- Marks game finished with `finish_reason="quit"`.
+- Marks game finished with `finish_reason="resign"`.
+
+### 6. OFFER_DRAW
+
+Request:
+
+```json
+{"cmd":"OFFER_DRAW","game_id":1,"token":"..."}
+```
+
+Rules:
+- Valid player token required.
+- Toggles the caller's draw agreement flag.
+- If both players have agreed, the game finishes with `winner="DRAW"` and `finish_reason="draw_agreed"`.
 
 ## State Object
 
@@ -117,6 +130,8 @@ Rules:
 - `o_token` (string or null)
 - `x_disconnected` (bool)
 - `o_disconnected` (bool)
+- `x_agree_draw` (bool)
+- `o_agree_draw` (bool)
 - `status` (`"waiting" | "playing" | "finished"`)
 - `winner` (`"X" | "O" | "DRAW" | null`)
 - `finish_reason` (string or null)
@@ -146,5 +161,5 @@ For each valid MOVE:
 4. Join same game from client C and verify role `SPECTATOR`, read-only behavior, and spectator banner.
 5. Submit moves with both Arrow keys and WASD from active player and verify server-authoritative turn enforcement.
 6. Stop server during gameplay; verify inline connection error and automatic reconnect attempts. Restart server and verify in-session reclaim via `JOIN_GAME` with token.
-7. Press ESC as player and verify `QUIT_GAME` + menu return; press ESC as spectator and verify local menu return without quit call.
+7. Click "Resign" as player and verify `RESIGN` + menu return; press ESC as spectator and verify local menu return without resign call.
 8. Finish a game and verify finished overlay shows winner/reason and "Return to Menu" action.

@@ -57,6 +57,8 @@ typedef struct {
     int *board;
     bool x_disconnected;
     bool o_disconnected;
+    bool x_agree_draw;
+    bool o_agree_draw;
     char active_player[16];
     char status[16];
     char winner[16];
@@ -162,6 +164,8 @@ static void remote_state_clear(RemoteState *state) {
     state->game_id = 0;
     state->x_disconnected = false;
     state->o_disconnected = false;
+    state->x_agree_draw = false;
+    state->o_agree_draw = false;
     state->active_player[0] = '\0';
     state->status[0] = '\0';
     state->winner[0] = '\0';
@@ -221,6 +225,8 @@ static bool parse_remote_state(RemoteState *state, cJSON *state_json, char *err,
 
     cJSON *x_disc_item = cJSON_GetObjectItemCaseSensitive(state_json, "x_disconnected");
     cJSON *o_disc_item = cJSON_GetObjectItemCaseSensitive(state_json, "o_disconnected");
+    cJSON *x_draw_item = cJSON_GetObjectItemCaseSensitive(state_json, "x_agree_draw");
+    cJSON *o_draw_item = cJSON_GetObjectItemCaseSensitive(state_json, "o_agree_draw");
     cJSON *winner_item = cJSON_GetObjectItemCaseSensitive(state_json, "winner");
     cJSON *reason_item = cJSON_GetObjectItemCaseSensitive(state_json, "finish_reason");
 
@@ -230,6 +236,8 @@ static bool parse_remote_state(RemoteState *state, cJSON *state_json, char *err,
     state->size = size;
     state->x_disconnected = cJSON_IsTrue(x_disc_item);
     state->o_disconnected = cJSON_IsTrue(o_disc_item);
+    state->x_agree_draw = cJSON_IsTrue(x_draw_item);
+    state->o_agree_draw = cJSON_IsTrue(o_draw_item);
 
     snprintf(state->active_player, sizeof(state->active_player), "%s", active_player_item->valuestring);
     snprintf(state->status, sizeof(state->status), "%s", status_item->valuestring);
@@ -634,7 +642,7 @@ static bool cmd_move(
     return ok;
 }
 
-static bool cmd_quit_game(
+static bool cmd_resign_game(
     NetClient *net,
     int game_id,
     const char *token,
@@ -644,7 +652,26 @@ static bool cmd_quit_game(
     size_t err_size
 ) {
     cJSON *request = cJSON_CreateObject();
-    cJSON_AddStringToObject(request, "cmd", "QUIT_GAME");
+    cJSON_AddStringToObject(request, "cmd", "RESIGN");
+    cJSON_AddNumberToObject(request, "game_id", game_id);
+    cJSON_AddStringToObject(request, "token", token);
+
+    bool ok = send_command(net, request, state, resp, err, err_size);
+    cJSON_Delete(request);
+    return ok;
+}
+
+static bool cmd_offer_draw(
+    NetClient *net,
+    int game_id,
+    const char *token,
+    RemoteState *state,
+    ServerResponse *resp,
+    char *err,
+    size_t err_size
+) {
+    cJSON *request = cJSON_CreateObject();
+    cJSON_AddStringToObject(request, "cmd", "OFFER_DRAW");
     cJSON_AddNumberToObject(request, "game_id", game_id);
     cJSON_AddStringToObject(request, "token", token);
 
@@ -995,7 +1022,7 @@ static void draw_menu(App *app, Rectangle minus_btn, Rectangle plus_btn, Rectang
     DrawText("Exit", (int)exit_btn.x + 94, (int)exit_btn.y + 16, 24, WHITE);
 }
 
-static void draw_gameplay(const App *app, Rectangle return_btn) {
+static void draw_gameplay(const App *app, Rectangle return_btn, Rectangle offer_draw_btn, Rectangle resign_btn) {
     DrawText(TextFormat("Game #%d", app->game_id), 20, 46, 24, DARKGRAY);
     DrawText(TextFormat("Role: %s", client_role_to_string(app->role)), 220, 50, 22, DARKGRAY);
 
@@ -1015,7 +1042,29 @@ static void draw_gameplay(const App *app, Rectangle return_btn) {
     draw_board(&app->state, 130);
 
     DrawText("Move: Arrow keys or WASD", 20, SCREEN_H - 42, 18, DARKGRAY);
-    DrawText("ESC: quit game (player) / return to menu (spectator)", 20, SCREEN_H - 22, 16, GRAY);
+
+    if (app->role == CLIENT_ROLE_SPECTATOR) {
+        DrawText("ESC: return to menu", 20, SCREEN_H - 22, 16, GRAY);
+    } else if (app->state.valid) {
+        bool my_agree = (app->role == CLIENT_ROLE_X) ? app->state.x_agree_draw : app->state.o_agree_draw;
+        bool opp_agree = (app->role == CLIENT_ROLE_X) ? app->state.o_agree_draw : app->state.x_agree_draw;
+        DrawText(TextFormat("Draw: you %s, opponent %s", my_agree ? "agreed" : "not agreed",
+                            opp_agree ? "agreed" : "not agreed"),
+                 20, SCREEN_H - 22, 16, GRAY);
+    }
+
+    if (is_player_role(app->role) && app->state.valid && strcmp(app->state.status, "finished") != 0) {
+        bool my_agree = (app->role == CLIENT_ROLE_X) ? app->state.x_agree_draw : app->state.o_agree_draw;
+        Color offer_col = my_agree ? DARKGRAY : (is_mouse_over(offer_draw_btn) ? DARKBLUE : BLUE);
+        Color resign_col = is_mouse_over(resign_btn) ? MAROON : RED;
+
+        DrawRectangleRec(offer_draw_btn, offer_col);
+        DrawText(my_agree ? "Withdraw Draw" : "Offer Draw",
+                 (int)offer_draw_btn.x + 12, (int)offer_draw_btn.y + 6, 20, RAYWHITE);
+
+        DrawRectangleRec(resign_btn, resign_col);
+        DrawText("Resign", (int)resign_btn.x + 48, (int)resign_btn.y + 6, 20, RAYWHITE);
+    }
 
     if (app->state.valid && strcmp(app->state.status, "finished") == 0) {
         DrawRectangle(0, 0, SCREEN_W, SCREEN_H, (Color){0, 0, 0, 120});
@@ -1098,6 +1147,8 @@ int main(int argc, char **argv) {
     Rectangle exit_btn = {120, 438, 280, 58};
 
     Rectangle finished_return_btn = {SCREEN_W / 2.0f - 130.0f, SCREEN_H / 2.0f + 56.0f, 260.0f, 58.0f};
+    Rectangle offer_draw_btn = {SCREEN_W - 360.0f, SCREEN_H - 30.0f, 180.0f, 30.0f};
+    Rectangle resign_btn = {SCREEN_W - 180.0f, SCREEN_H - 30.0f, 180.0f, 30.0f};
 
     while (!WindowShouldClose()) {
         if (app.screen == APP_MENU) {
@@ -1160,21 +1211,6 @@ int main(int argc, char **argv) {
                 if (app.role == CLIENT_ROLE_SPECTATOR) {
                     set_status(&app, false, "Returned to menu from spectator view");
                     reset_to_menu(&app);
-                } else if (is_player_role(app.role)) {
-                    if (net.fd < 0) {
-                        set_status(&app, true, "Disconnected. Cannot QUIT_GAME until reconnect succeeds.");
-                    } else {
-                        ServerResponse resp;
-                        char err[256];
-                        if (!cmd_quit_game(&net, app.game_id, app.token, &app.state, &resp, err, sizeof(err))) {
-                            set_status(&app, true, "QUIT_GAME failed: %s", err);
-                        } else if (!resp.ok) {
-                            set_status(&app, true, "QUIT_GAME rejected: %s (%s)", resp.error_message, resp.error_code);
-                        } else {
-                            set_status(&app, false, "Quit game #%d", app.game_id);
-                            reset_to_menu(&app);
-                        }
-                    }
                 }
             }
 
@@ -1194,6 +1230,44 @@ int main(int argc, char **argv) {
                 if (direction >= 0) {
                     try_submit_move(&app, &net, direction);
                 }
+            }
+
+            if (!finished && is_player_role(app.role) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+                if (is_mouse_over(resign_btn)) {
+                    if (net.fd < 0) {
+                        set_status(&app, true, "Disconnected. Cannot resign until reconnect succeeds.");
+                    } else {
+                        ServerResponse resp;
+                        char err[256];
+                        if (!cmd_resign_game(&net, app.game_id, app.token, &app.state, &resp, err, sizeof(err))) {
+                            set_status(&app, true, "Resign failed: %s", err);
+                        } else if (!resp.ok) {
+                            set_status(&app, true, "Resign rejected: %s (%s)", resp.error_message, resp.error_code);
+                        } else {
+                            set_status(&app, false, "Resigned from game #%d", app.game_id);
+                            reset_to_menu(&app);
+                        }
+                    }
+                } else if (is_mouse_over(offer_draw_btn)) {
+                    bool was_agree = (app.role == CLIENT_ROLE_X) ? app.state.x_agree_draw : app.state.o_agree_draw;
+                    if (net.fd < 0) {
+                        set_status(&app, true, "Disconnected. Cannot offer draw until reconnect succeeds.");
+                    } else {
+                        ServerResponse resp;
+                        char err[256];
+                        if (!cmd_offer_draw(&net, app.game_id, app.token, &app.state, &resp, err, sizeof(err))) {
+                            set_status(&app, true, "Offer draw failed: %s", err);
+                        } else if (!resp.ok) {
+                            set_status(&app, true, "Offer draw rejected: %s (%s)", resp.error_message, resp.error_code);
+                        } else if (app.state.valid && strcmp(app.state.status, "finished") == 0) {
+                            set_status(&app, false, "Draw agreed. Game finished.");
+                        } else if (was_agree) {
+                            set_status(&app, false, "Draw offer withdrawn");
+                        } else {
+                            set_status(&app, false, "Draw offer sent");
+                        }
+                    }
+                }
             } else if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && is_mouse_over(finished_return_btn)) {
                 set_status(&app, false, "Returned to menu from finished game");
                 reset_to_menu(&app);
@@ -1208,7 +1282,7 @@ int main(int argc, char **argv) {
         if (app.screen == APP_MENU) {
             draw_menu(&app, minus_btn, plus_btn, create_btn, join_input_box, join_btn, exit_btn);
         } else {
-            draw_gameplay(&app, finished_return_btn);
+            draw_gameplay(&app, finished_return_btn, offer_draw_btn, resign_btn);
         }
 
         EndDrawing();

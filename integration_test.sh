@@ -153,7 +153,7 @@ echo "Starting server..."
 SERVER_PID=$!
 sleep 0.3
 
-echo "[1/8] NEW_GAME size validation and seed check"
+echo "[1/9] NEW_GAME size validation and seed check"
 resp=$(send_json '{"cmd":"NEW_GAME","size":2}')
 assert_eq "$(json_get "$resp" "ok")" "false" "NEW_GAME size<3 should fail"
 assert_eq "$(json_get "$resp" "error.code")" "INVALID_SIZE" "Expected INVALID_SIZE"
@@ -169,7 +169,7 @@ assert_eq "$(json_get "$resp" "state.board.13")" "2" "Odd seed O position mismat
 GAME_FILE="data/game_${GAME_ID}.json"
 [[ -f "$GAME_FILE" ]] || { echo "Expected game file $GAME_FILE"; exit 1; }
 
-echo "[2/8] JOIN role assignment and spectator fallback"
+echo "[2/9] JOIN role assignment and spectator fallback"
 resp=$(send_json "{\"cmd\":\"JOIN_GAME\",\"game_id\":${GAME_ID}}")
 assert_eq "$(json_get "$resp" "ok")" "true" "JOIN_GAME should pass"
 assert_eq "$(json_get "$resp" "role")" "O" "Second join should become O"
@@ -182,7 +182,7 @@ assert_eq "$(json_get "$resp" "token")" "null" "Spectator should not get token"
 
 assert_file_contains "$GAME_FILE" '"status":"playing"' "Game should persist as playing after O joins"
 
-echo "[3/8] MOVE auth and turn checks"
+echo "[3/9] MOVE auth and turn checks"
 resp=$(send_json "{\"cmd\":\"MOVE\",\"game_id\":${GAME_ID},\"token\":\"badtoken\",\"direction\":0}")
 assert_eq "$(json_get "$resp" "ok")" "false" "Bad token move should fail"
 assert_eq "$(json_get "$resp" "error.code")" "UNAUTHORIZED" "Expected UNAUTHORIZED"
@@ -199,7 +199,7 @@ resp=$(send_json "{\"cmd\":\"MOVE\",\"game_id\":${GAME_ID},\"token\":\"${X_TOKEN
 assert_eq "$(json_get "$resp" "ok")" "false" "Back-to-back X move should fail"
 assert_eq "$(json_get "$resp" "error.code")" "NOT_YOUR_TURN" "Expected NOT_YOUR_TURN"
 
-echo "[4/8] Capture-removal deterministic scenario"
+echo "[4/9] Capture-removal deterministic scenario"
 cat > data/game_777.json <<'JSON'
 {"game_id":777,"size":3,"board":[1,1,1,1,2,1,1,1,0],"active_player":"X","x_token":"1111111111111111","o_token":"2222222222222222","x_disconnected":false,"o_disconnected":false,"status":"playing","winner":null,"finish_reason":null,"created_at":1,"updated_at":1}
 JSON
@@ -212,22 +212,53 @@ assert_eq "$(json_get "$resp" "state.finish_reason")" "elimination" "Expected el
 assert_eq "$(json_get "$resp" "state.board.4")" "0" "Captured surrounded O should be removed"
 assert_eq "$(json_get "$resp" "state.board.8")" "1" "New cloned X should remain on board"
 
-echo "[5/8] GET_STATE polling"
+echo "[5/9] GET_STATE polling"
 resp=$(send_json "{\"cmd\":\"GET_STATE\",\"game_id\":${GAME_ID}}")
 assert_eq "$(json_get "$resp" "ok")" "true" "GET_STATE should succeed"
 assert_eq "$(json_get "$resp" "state.game_id")" "$GAME_ID" "GET_STATE game_id mismatch"
 
-echo "[6/8] QUIT_GAME finish behavior"
-resp=$(send_json "{\"cmd\":\"QUIT_GAME\",\"game_id\":${GAME_ID},\"token\":\"${O_TOKEN}\"}")
-assert_eq "$(json_get "$resp" "ok")" "true" "QUIT_GAME should succeed"
-assert_eq "$(json_get "$resp" "state.status")" "finished" "Game should be finished after quit"
-assert_eq "$(json_get "$resp" "state.winner")" "X" "If O quits, winner should be X"
-assert_eq "$(json_get "$resp" "state.finish_reason")" "quit" "Quit reason should be persisted"
+echo "[6/9] OFFER_DRAW agreement behavior"
+resp=$(send_json '{"cmd":"NEW_GAME","size":5}')
+assert_eq "$(json_get "$resp" "ok")" "true" "NEW_GAME for draw test should pass"
+DRAW_GAME_ID="$(json_get "$resp" "state.game_id")"
+DRAW_X_TOKEN="$(json_get "$resp" "token")"
+
+resp=$(send_json "{\"cmd\":\"JOIN_GAME\",\"game_id\":${DRAW_GAME_ID}}")
+assert_eq "$(json_get "$resp" "ok")" "true" "JOIN_GAME for draw test should pass"
+DRAW_O_TOKEN="$(json_get "$resp" "token")"
+
+resp=$(send_json "{\"cmd\":\"OFFER_DRAW\",\"game_id\":${DRAW_GAME_ID},\"token\":\"${DRAW_X_TOKEN}\"}")
+assert_eq "$(json_get "$resp" "ok")" "true" "OFFER_DRAW from X should succeed"
+assert_eq "$(json_get "$resp" "state.x_agree_draw")" "true" "X draw agree should be true"
+assert_eq "$(json_get "$resp" "state.status")" "playing" "Game should still be playing after one offer"
+
+resp=$(send_json "{\"cmd\":\"OFFER_DRAW\",\"game_id\":${DRAW_GAME_ID},\"token\":\"${DRAW_X_TOKEN}\"}")
+assert_eq "$(json_get "$resp" "ok")" "true" "OFFER_DRAW from X should toggle off"
+assert_eq "$(json_get "$resp" "state.x_agree_draw")" "false" "X draw agree should be false after toggle"
+assert_eq "$(json_get "$resp" "state.status")" "playing" "Game should still be playing after toggle"
+
+resp=$(send_json "{\"cmd\":\"OFFER_DRAW\",\"game_id\":${DRAW_GAME_ID},\"token\":\"${DRAW_X_TOKEN}\"}")
+assert_eq "$(json_get "$resp" "ok")" "true" "OFFER_DRAW from X should toggle on"
+assert_eq "$(json_get "$resp" "state.x_agree_draw")" "true" "X draw agree should be true after re-offer"
+
+resp=$(send_json "{\"cmd\":\"OFFER_DRAW\",\"game_id\":${DRAW_GAME_ID},\"token\":\"${DRAW_O_TOKEN}\"}")
+assert_eq "$(json_get "$resp" "ok")" "true" "OFFER_DRAW from O should succeed"
+assert_eq "$(json_get "$resp" "state.o_agree_draw")" "true" "O draw agree should be true"
+assert_eq "$(json_get "$resp" "state.status")" "finished" "Game should finish after both agree"
+assert_eq "$(json_get "$resp" "state.winner")" "DRAW" "Draw agreement should end in DRAW"
+assert_eq "$(json_get "$resp" "state.finish_reason")" "draw_agreed" "Draw reason should be persisted"
+
+echo "[7/9] RESIGN finish behavior"
+resp=$(send_json "{\"cmd\":\"RESIGN\",\"game_id\":${GAME_ID},\"token\":\"${O_TOKEN}\"}")
+assert_eq "$(json_get "$resp" "ok")" "true" "RESIGN should succeed"
+assert_eq "$(json_get "$resp" "state.status")" "finished" "Game should be finished after resign"
+assert_eq "$(json_get "$resp" "state.winner")" "X" "If O resigns, winner should be X"
+assert_eq "$(json_get "$resp" "state.finish_reason")" "resign" "Resign reason should be persisted"
 
 assert_file_contains "$GAME_FILE" '"status":"finished"' "Finished status should persist"
-assert_file_contains "$GAME_FILE" '"finish_reason":"quit"' "Quit reason should persist"
+assert_file_contains "$GAME_FILE" '"finish_reason":"resign"' "Resign reason should persist"
 
-echo "[7/8] Finished-game access restrictions"
+echo "[8/9] Finished-game access restrictions"
 resp=$(send_json "{\"cmd\":\"MOVE\",\"game_id\":${GAME_ID},\"token\":\"${X_TOKEN}\",\"direction\":1}")
 assert_eq "$(json_get "$resp" "ok")" "false" "MOVE on finished game should fail"
 assert_eq "$(json_get "$resp" "error.code")" "GAME_FINISHED" "Expected GAME_FINISHED"
@@ -239,7 +270,7 @@ assert_eq "$(json_get "$resp" "error.code")" "GAME_FINISHED" "Expected GAME_FINI
 resp=$(send_json "{\"cmd\":\"GET_STATE\",\"game_id\":${GAME_ID}}")
 assert_eq "$(json_get "$resp" "ok")" "true" "GET_STATE should work for finished game"
 
-echo "[8/8] Lazy-load from disk"
+echo "[9/9] Lazy-load from disk"
 cat > data/game_778.json <<'JSON'
 {"game_id":778,"size":3,"board":[1,0,2,0,1,0,2,0,1],"active_player":"O","x_token":"aaaaaaaaaaaaaaaa","o_token":"bbbbbbbbbbbbbbbb","x_disconnected":true,"o_disconnected":false,"status":"playing","winner":null,"finish_reason":null,"created_at":2,"updated_at":2}
 JSON
