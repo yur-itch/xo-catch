@@ -1026,7 +1026,7 @@ static void draw_menu_create(App *app, Rectangle minus_btn, Rectangle plus_btn, 
     DrawText("-", (int)minus_btn.x + 20, (int)minus_btn.y + 8, 38, BLACK);
 
     DrawText(TextFormat("%dx%d", app->create_size, app->create_size),
-             220, 212, 30, BLACK);
+             220, 372, 30, BLACK);
 
     DrawRectangleRec(plus_btn, LIGHTGRAY);
     DrawText("+", (int)plus_btn.x + 17, (int)plus_btn.y + 8, 38, BLACK);
@@ -1185,11 +1185,11 @@ int main(int argc, char **argv) {
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
 
-    Rectangle minus_btn = {120, 188, 56, 56};
-    Rectangle plus_btn = {344, 188, 56, 56};
+    Rectangle minus_btn = {120, 352, 56, 56};
+    Rectangle plus_btn = {344, 352, 56, 56};
     Rectangle create_btn = {120, 258, 280, 58};
 
-    Rectangle join_input_box = {120, 198, 280, 56};
+    Rectangle join_input_box = {120, 258, 280, 56};
     Rectangle join_action_btn = {120, 352, 280, 58};
     Rectangle main_join_btn = {120, 352, 280, 58};
     Rectangle back_btn = {120, 438, 280, 58};
