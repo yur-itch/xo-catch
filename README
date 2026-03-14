@@ -52,6 +52,20 @@ End conditions currently implemented:
 
 ## Build
 
+Linux (Makefile):
+
+```bash
+make
+# or: make server / make client
+```
+
+If your system needs custom linker flags, you can override them, e.g.:
+
+```bash
+make server CJSON_LIBS="-L/lib/x86_64-linux-gnu -Wl,-rpath,/lib/x86_64-linux-gnu -Wl,-l:libcjson.so.1"
+make client RAYLIB_LIBS="-lraylib -lm -lpthread -ldl -lrt -lX11 -lGL -lXrandr -lXi -lXcursor -lXinerama"
+```
+
 Server:
 
 ```bash
@@ -85,6 +99,23 @@ gcc -std=c11 -Wall -Wextra -O2 -o client client.c -I/usr/local/include -L/usr/lo
   -L/lib/x86_64-linux-gnu -Wl,-rpath,/lib/x86_64-linux-gnu -Wl,-l:libcjson.so.1 \
   -lm -lpthread -ldl -lrt -lX11 -lGL -lXrandr -lXi -lXcursor -lXinerama
 ```
+
+Windows (MinGW-w64, raw gcc commands):
+
+Server:
+
+```bash
+x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -O2 -o server.exe server.c game_logic.c -lcjson -lws2_32
+```
+
+Client (static Raylib, adjust paths):
+
+```bash
+x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -O2 -o client.exe client.c \
+  -I<RAYLIB_INC> -L<RAYLIB_LIB> -lraylib -lcjson -lopengl32 -lgdi32 -lwinmm -luser32 -lws2_32
+```
+
+Add `-L<path>` flags for your cJSON and Raylib libraries if they are not on the default search path.
 
 ## Run
 

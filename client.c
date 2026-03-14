@@ -1,19 +1,40 @@
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#ifndef FD_SETSIZE
+#define FD_SETSIZE 1024
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#else
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
+#endif
 
 #include "raylib.h"
 
@@ -38,6 +59,28 @@
 #define RECONNECT_INTERVAL_SEC 1.0
 #define MIN_BOARD_SIZE 3
 #define MAX_BOARD_SIZE 25
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+#ifdef _WIN32
+typedef SOCKET socket_t;
+#define SOCKET_INVALID INVALID_SOCKET
+#define SOCKET_CLOSE closesocket
+#define NET_ERRNO() WSAGetLastError()
+#define NET_EINTR WSAEINTR
+#define NET_EWOULDBLOCK WSAEWOULDBLOCK
+#define NET_EINPROGRESS WSAEINPROGRESS
+#else
+typedef int socket_t;
+#define SOCKET_INVALID (-1)
+#define SOCKET_CLOSE close
+#define NET_ERRNO() errno
+#define NET_EINTR EINTR
+#define NET_EWOULDBLOCK EWOULDBLOCK
+#define NET_EINPROGRESS EINPROGRESS
+#endif
 
 typedef enum {
     APP_MENU_MAIN = 0,
@@ -80,7 +123,7 @@ typedef struct {
 } ServerResponse;
 
 typedef struct {
-    int fd;
+    socket_t fd;
     char host[128];
     int port;
     char recv_buffer[CLIENT_RECV_BUFFER];
@@ -113,9 +156,34 @@ static bool is_mouse_over(Rectangle rect) {
 }
 
 static long long monotonic_ms(void) {
+#ifdef _WIN32
+    return (long long)GetTickCount64();
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long long)ts.tv_sec * 1000LL + (long long)ts.tv_nsec / 1000000LL;
+#endif
+}
+
+static void ignore_sigpipe(void) {
+#ifdef SIGPIPE
+    signal(SIGPIPE, SIG_IGN);
+#endif
+}
+
+static bool net_init(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+#else
+    return true;
+#endif
+}
+
+static void net_cleanup(void) {
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 static void set_status(App *app, bool is_error, const char *fmt, ...) {
@@ -266,20 +334,24 @@ static void server_response_clear(ServerResponse *resp) {
 
 static void net_client_init(NetClient *client, const char *host, int port) {
     memset(client, 0, sizeof(*client));
-    client->fd = -1;
+    client->fd = SOCKET_INVALID;
     snprintf(client->host, sizeof(client->host), "%s", host);
     client->port = port;
 }
 
 static void net_close(NetClient *client) {
-    if (client->fd >= 0) {
-        close(client->fd);
+    if (client->fd != SOCKET_INVALID) {
+        SOCKET_CLOSE(client->fd);
     }
-    client->fd = -1;
+    client->fd = SOCKET_INVALID;
     client->recv_len = 0;
 }
 
-static bool net_set_blocking(int fd, bool blocking) {
+static bool net_set_blocking(socket_t fd, bool blocking) {
+#ifdef _WIN32
+    u_long mode = blocking ? 0 : 1;
+    return ioctlsocket(fd, FIONBIO, &mode) == 0;
+#else
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
         return false;
@@ -292,10 +364,11 @@ static bool net_set_blocking(int fd, bool blocking) {
     }
 
     return fcntl(fd, F_SETFL, flags) == 0;
+#endif
 }
 
 static bool net_connect(NetClient *client, int timeout_ms, char *err, size_t err_size) {
-    if (client->fd >= 0) {
+    if (client->fd != SOCKET_INVALID) {
         return true;
     }
 
@@ -310,52 +383,60 @@ static bool net_connect(NetClient *client, int timeout_ms, char *err, size_t err
 
     int gai = getaddrinfo(client->host, port_str, &hints, &result);
     if (gai != 0) {
-        snprintf(err, err_size, "DNS/addr error: %s", gai_strerror(gai));
+        snprintf(err, err_size, "DNS/addr error: %s",
+#ifdef _WIN32
+                 gai_strerrorA(gai)
+#else
+                 gai_strerror(gai)
+#endif
+        );
         return false;
     }
 
     bool connected = false;
     for (struct addrinfo *it = result; it != NULL; it = it->ai_next) {
-        int fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
-        if (fd < 0) {
+        socket_t fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (fd == SOCKET_INVALID) {
             continue;
         }
 
         if (!net_set_blocking(fd, false)) {
-            close(fd);
+            SOCKET_CLOSE(fd);
             continue;
         }
 
         int rc = connect(fd, it->ai_addr, it->ai_addrlen);
-        if (rc < 0 && errno != EINPROGRESS) {
-            close(fd);
-            continue;
-        }
-
         if (rc < 0) {
+            int err_code = NET_ERRNO();
+            if (err_code != NET_EINPROGRESS && err_code != NET_EWOULDBLOCK) {
+                SOCKET_CLOSE(fd);
+                continue;
+            }
             fd_set write_set;
             FD_ZERO(&write_set);
             FD_SET(fd, &write_set);
             struct timeval tv;
             tv.tv_sec = timeout_ms / 1000;
             tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-            int ready = select(fd + 1, NULL, &write_set, NULL, &tv);
+            int ready = 0;
+            do {
+                ready = select((int)fd + 1, NULL, &write_set, NULL, &tv);
+            } while (ready < 0 && NET_ERRNO() == NET_EINTR);
             if (ready <= 0) {
-                close(fd);
+                SOCKET_CLOSE(fd);
                 continue;
             }
 
             int so_error = 0;
             socklen_t so_len = sizeof(so_error);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_len) != 0 || so_error != 0) {
-                close(fd);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&so_error, &so_len) != 0 || so_error != 0) {
+                SOCKET_CLOSE(fd);
                 continue;
             }
         }
 
         if (!net_set_blocking(fd, true)) {
-            close(fd);
+            SOCKET_CLOSE(fd);
             continue;
         }
 
@@ -374,12 +455,12 @@ static bool net_connect(NetClient *client, int timeout_ms, char *err, size_t err
     return connected;
 }
 
-static bool net_send_all(int fd, const char *data, size_t len) {
+static bool net_send_all(socket_t fd, const char *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, data + sent, len - sent, 0);
+        ssize_t n = send(fd, data + sent, (int)(len - sent), MSG_NOSIGNAL);
         if (n < 0) {
-            if (errno == EINTR) {
+            if (NET_ERRNO() == NET_EINTR) {
                 continue;
             }
             return false;
@@ -441,9 +522,9 @@ static bool net_recv_line(NetClient *client, int timeout_ms, char *out_line, siz
         tv.tv_sec = wait_ms / 1000;
         tv.tv_usec = (wait_ms % 1000) * 1000;
 
-        int ready = select(client->fd + 1, &read_set, NULL, NULL, &tv);
+        int ready = select((int)client->fd + 1, &read_set, NULL, NULL, &tv);
         if (ready < 0) {
-            if (errno == EINTR) {
+            if (NET_ERRNO() == NET_EINTR) {
                 continue;
             }
             snprintf(err, err_size, "select() failed while reading response");
@@ -455,7 +536,7 @@ static bool net_recv_line(NetClient *client, int timeout_ms, char *out_line, siz
         }
 
         char chunk[4096];
-        ssize_t n = recv(client->fd, chunk, sizeof(chunk), 0);
+        ssize_t n = recv(client->fd, chunk, (int)sizeof(chunk), 0);
         if (n <= 0) {
             snprintf(err, err_size, "Server closed connection");
             return false;
@@ -782,7 +863,7 @@ static void poll_game_state(App *app, NetClient *net) {
     }
     app->last_poll_time = now;
 
-    if (net->fd < 0) {
+    if (net->fd == SOCKET_INVALID) {
         if (now - app->last_reconnect_attempt < RECONNECT_INTERVAL_SEC) {
             return;
         }
@@ -1169,6 +1250,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    ignore_sigpipe();
+    if (!net_init()) {
+        fprintf(stderr, "Failed to initialize networking\n");
+        return 1;
+    }
+
     App app;
     memset(&app, 0, sizeof(app));
     app.screen = APP_MENU_MAIN;
@@ -1332,7 +1419,7 @@ int main(int argc, char **argv) {
 
             if (!finished && is_player_role(app.role) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
                 if (is_mouse_over(resign_btn)) {
-                    if (net.fd < 0) {
+                    if (net.fd == SOCKET_INVALID) {
                         set_status(&app, true, "Disconnected. Cannot resign until reconnect succeeds.");
                     } else {
                         ServerResponse resp;
@@ -1348,7 +1435,7 @@ int main(int argc, char **argv) {
                     }
                 } else if (is_mouse_over(offer_draw_btn)) {
                     bool was_agree = (app.role == CLIENT_ROLE_X) ? app.state.x_agree_draw : app.state.o_agree_draw;
-                    if (net.fd < 0) {
+                    if (net.fd == SOCKET_INVALID) {
                         set_status(&app, true, "Disconnected. Cannot offer draw until reconnect succeeds.");
                     } else {
                         ServerResponse resp;
@@ -1397,5 +1484,6 @@ int main(int argc, char **argv) {
     net_close(&net);
     remote_state_clear(&app.state);
     CloseWindow();
+    net_cleanup();
     return 0;
 }

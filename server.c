@@ -1,18 +1,39 @@
-#include <arpa/inet.h>
-#include <dirent.h>
 #include <errno.h>
-#include <netinet/in.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#ifndef FD_SETSIZE
+#define FD_SETSIZE 1024
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <direct.h>
+#include <process.h>
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#else
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
+#endif
 
 #if __has_include("cJSON.h")
 #include "cJSON.h"
@@ -32,6 +53,29 @@
 #define CLIENT_BUFFER_SIZE 32768
 #define LINE_BUFFER_SIZE 32768
 #define MAX_CLIENTS FD_SETSIZE
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+#ifdef _WIN32
+typedef SOCKET socket_t;
+#define SOCKET_INVALID INVALID_SOCKET
+#define SOCKET_CLOSE closesocket
+#define NET_ERRNO() WSAGetLastError()
+#define NET_EINTR WSAEINTR
+#define NET_EWOULDBLOCK WSAEWOULDBLOCK
+#define NET_EINPROGRESS WSAEINPROGRESS
+#define getpid _getpid
+#else
+typedef int socket_t;
+#define SOCKET_INVALID (-1)
+#define SOCKET_CLOSE close
+#define NET_ERRNO() errno
+#define NET_EINTR EINTR
+#define NET_EWOULDBLOCK EWOULDBLOCK
+#define NET_EINPROGRESS EINPROGRESS
+#endif
 
 enum Role {
     ROLE_NONE = 0,
@@ -69,8 +113,8 @@ typedef struct Game {
     bool o_disconnected;
     bool x_agree_draw;
     bool o_agree_draw;
-    int x_conn_fd;
-    int o_conn_fd;
+    socket_t x_conn_fd;
+    socket_t o_conn_fd;
 
     int status;
     int winner;
@@ -83,7 +127,7 @@ typedef struct Game {
 } Game;
 
 typedef struct {
-    int fd;
+    socket_t fd;
     char buffer[CLIENT_BUFFER_SIZE];
     size_t len;
 } ClientConn;
@@ -168,6 +212,27 @@ static void touch_game(Game *game) {
     game->updated_at = time(NULL);
 }
 
+static void ignore_sigpipe(void) {
+#ifdef SIGPIPE
+    signal(SIGPIPE, SIG_IGN);
+#endif
+}
+
+static bool net_init(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+#else
+    return true;
+#endif
+}
+
+static void net_cleanup(void) {
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
 static void ensure_data_dir(void) {
     struct stat st;
     if (stat(DATA_DIR, &st) == 0) {
@@ -178,7 +243,11 @@ static void ensure_data_dir(void) {
         return;
     }
 
+#ifdef _WIN32
+    if (_mkdir(DATA_DIR) != 0) {
+#else
     if (mkdir(DATA_DIR, 0755) != 0) {
+#endif
         perror("mkdir data dir");
         exit(1);
     }
@@ -420,8 +489,8 @@ static Game *load_game_from_disk(int game_id) {
 
     game->game_id = game_id;
     game->size = size;
-    game->x_conn_fd = -1;
-    game->o_conn_fd = -1;
+    game->x_conn_fd = SOCKET_INVALID;
+    game->o_conn_fd = SOCKET_INVALID;
 
     for (int i = 0; i < total; ++i) {
         cJSON *entry = cJSON_GetArrayItem(board_item, i);
@@ -556,12 +625,12 @@ static bool persist_touched_game(Game *game) {
     return true;
 }
 
-static bool send_all(int fd, const char *data, size_t len) {
+static bool send_all(socket_t fd, const char *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, data + sent, len - sent, 0);
+        ssize_t n = send(fd, data + sent, (int)(len - sent), MSG_NOSIGNAL);
         if (n < 0) {
-            if (errno == EINTR) {
+            if (NET_ERRNO() == NET_EINTR) {
                 continue;
             }
             return false;
@@ -574,7 +643,7 @@ static bool send_all(int fd, const char *data, size_t len) {
     return true;
 }
 
-static void send_json_response(int fd, cJSON *response) {
+static void send_json_response(socket_t fd, cJSON *response) {
     char *encoded = cJSON_PrintUnformatted(response);
     if (encoded == NULL) {
         return;
@@ -704,7 +773,7 @@ static cJSON *get_game_by_id_from_request(cJSON *request, Game **out_game) {
     return NULL;
 }
 
-static Game *create_new_game(int size, int creator_fd) {
+static Game *create_new_game(int size, socket_t creator_fd) {
     Game *game = calloc(1, sizeof(Game));
     if (game == NULL) {
         return NULL;
@@ -733,7 +802,7 @@ static Game *create_new_game(int size, int creator_fd) {
     game->x_agree_draw = false;
     game->o_agree_draw = false;
     game->x_conn_fd = creator_fd;
-    game->o_conn_fd = -1;
+    game->o_conn_fd = SOCKET_INVALID;
 
     game->status = STATUS_WAITING;
     game->winner = WINNER_NONE;
@@ -746,7 +815,7 @@ static Game *create_new_game(int size, int creator_fd) {
     return game;
 }
 
-static cJSON *handle_new_game(cJSON *request, int client_fd) {
+static cJSON *handle_new_game(cJSON *request, socket_t client_fd) {
     int size = 0;
     if (!get_required_int(request, "size", &size)) {
         return err_invalid_number_field("size");
@@ -771,7 +840,7 @@ static cJSON *handle_new_game(cJSON *request, int client_fd) {
     return response;
 }
 
-static cJSON *handle_join_game(cJSON *request, int client_fd) {
+static cJSON *handle_join_game(cJSON *request, socket_t client_fd) {
     Game *game = NULL;
     cJSON *lookup_err = get_game_by_id_from_request(request, &game);
     if (lookup_err != NULL) {
@@ -843,7 +912,7 @@ static cJSON *handle_join_game(cJSON *request, int client_fd) {
     return response;
 }
 
-static cJSON *handle_get_state(cJSON *request, int client_fd) {
+static cJSON *handle_get_state(cJSON *request, socket_t client_fd) {
     (void)client_fd;
     Game *game = NULL;
     cJSON *lookup_err = get_game_by_id_from_request(request, &game);
@@ -854,7 +923,7 @@ static cJSON *handle_get_state(cJSON *request, int client_fd) {
     return make_state_ok_response(game);
 }
 
-static cJSON *handle_move(cJSON *request, int client_fd) {
+static cJSON *handle_move(cJSON *request, socket_t client_fd) {
     (void)client_fd;
     int direction = -1;
     const char *token = NULL;
@@ -908,7 +977,7 @@ static cJSON *handle_move(cJSON *request, int client_fd) {
     return make_state_ok_response(game);
 }
 
-static cJSON *handle_resign_game(cJSON *request, int client_fd) {
+static cJSON *handle_resign_game(cJSON *request, socket_t client_fd) {
     (void)client_fd;
     const char *token = NULL;
 
@@ -951,7 +1020,7 @@ static cJSON *handle_resign_game(cJSON *request, int client_fd) {
     return make_state_ok_response(game);
 }
 
-static cJSON *handle_offer_draw(cJSON *request, int client_fd) {
+static cJSON *handle_offer_draw(cJSON *request, socket_t client_fd) {
     (void)client_fd;
     const char *token = NULL;
 
@@ -997,7 +1066,7 @@ static cJSON *handle_offer_draw(cJSON *request, int client_fd) {
     return make_state_ok_response(game);
 }
 
-static cJSON *dispatch_request(const char *line, int client_fd) {
+static cJSON *dispatch_request(const char *line, socket_t client_fd) {
     cJSON *request = cJSON_Parse(line);
     if (request == NULL || !cJSON_IsObject(request)) {
         if (request != NULL) {
@@ -1012,7 +1081,7 @@ static cJSON *dispatch_request(const char *line, int client_fd) {
         return err_invalid_string_field("cmd");
     }
 
-    typedef cJSON *(*CommandHandler)(cJSON *, int);
+    typedef cJSON *(*CommandHandler)(cJSON *, socket_t);
     typedef struct {
         const char *name;
         CommandHandler handler;
@@ -1043,18 +1112,18 @@ static cJSON *dispatch_request(const char *line, int client_fd) {
     return response;
 }
 
-static int create_server_socket(void) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+static socket_t create_server_socket(void) {
+    socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == SOCKET_INVALID) {
         perror("socket");
-        return -1;
+        return SOCKET_INVALID;
     }
 
     int opt = 1;
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0) {
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt)) != 0) {
         perror("setsockopt");
-        close(fd);
-        return -1;
+        SOCKET_CLOSE(fd);
+        return SOCKET_INVALID;
     }
 
     struct sockaddr_in addr;
@@ -1063,38 +1132,38 @@ static int create_server_socket(void) {
     addr.sin_port = htons((uint16_t)g_listen_port);
     if (inet_pton(AF_INET, g_listen_ip, &addr.sin_addr) != 1) {
         fprintf(stderr, "Invalid bind IP address: %s\n", g_listen_ip);
-        close(fd);
-        return -1;
+        SOCKET_CLOSE(fd);
+        return SOCKET_INVALID;
     }
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         perror("bind");
-        close(fd);
-        return -1;
+        SOCKET_CLOSE(fd);
+        return SOCKET_INVALID;
     }
 
     if (listen(fd, 32) != 0) {
         perror("listen");
-        close(fd);
-        return -1;
+        SOCKET_CLOSE(fd);
+        return SOCKET_INVALID;
     }
 
     return fd;
 }
 
-static void update_disconnect_flags_for_fd(int fd) {
+static void update_disconnect_flags_for_fd(socket_t fd) {
     Game *game = g_games;
     while (game != NULL) {
         bool changed = false;
         if (game->x_conn_fd == fd) {
-            game->x_conn_fd = -1;
+            game->x_conn_fd = SOCKET_INVALID;
             if (game->status != STATUS_FINISHED) {
                 game->x_disconnected = true;
                 changed = true;
             }
         }
         if (game->o_conn_fd == fd) {
-            game->o_conn_fd = -1;
+            game->o_conn_fd = SOCKET_INVALID;
             if (game->status != STATUS_FINISHED) {
                 game->o_disconnected = true;
                 changed = true;
@@ -1110,10 +1179,10 @@ static void update_disconnect_flags_for_fd(int fd) {
 }
 
 static void close_client(ClientConn *client) {
-    if (client->fd >= 0) {
+    if (client->fd != SOCKET_INVALID) {
         update_disconnect_flags_for_fd(client->fd);
-        close(client->fd);
-        client->fd = -1;
+        SOCKET_CLOSE(client->fd);
+        client->fd = SOCKET_INVALID;
         client->len = 0;
     }
 }
@@ -1130,7 +1199,7 @@ static bool find_line_end(const char *buffer, size_t len, size_t *line_end_index
 
 static void handle_client_readable(ClientConn *client) {
     char incoming[4096];
-    ssize_t n = recv(client->fd, incoming, sizeof(incoming), 0);
+    ssize_t n = recv(client->fd, incoming, (int)sizeof(incoming), 0);
 
     if (n <= 0) {
         close_client(client);
@@ -1179,13 +1248,37 @@ static void handle_client_readable(ClientConn *client) {
         send_json_response(client->fd, response);
         cJSON_Delete(response);
 
-        if (client->fd < 0) {
+        if (client->fd == SOCKET_INVALID) {
             return;
         }
     }
 }
 
 static int compute_next_game_id(void) {
+#ifdef _WIN32
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof(pattern), "%s/game_*.json", DATA_DIR);
+
+    WIN32_FIND_DATAA find_data;
+    HANDLE h = FindFirstFileA(pattern, &find_data);
+    if (h == INVALID_HANDLE_VALUE) {
+        return 1;
+    }
+
+    int max_id = 0;
+    do {
+        int id = 0;
+        char tail[8] = {0};
+        if (sscanf(find_data.cFileName, "game_%d.%7s", &id, tail) == 2) {
+            if (strcmp(tail, "json") == 0 && id > max_id) {
+                max_id = id;
+            }
+        }
+    } while (FindNextFileA(h, &find_data));
+
+    FindClose(h);
+    return max_id + 1;
+#else
     DIR *dir = opendir(DATA_DIR);
     if (dir == NULL) {
         return 1;
@@ -1205,9 +1298,11 @@ static int compute_next_game_id(void) {
 
     closedir(dir);
     return max_id + 1;
+#endif
 }
 
 int main(int argc, char **argv) {
+    ignore_sigpipe();
     if (argc >= 2) {
         snprintf(g_listen_ip, sizeof(g_listen_ip), "%s", argv[1]);
     }
@@ -1226,24 +1321,31 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    if (!net_init()) {
+        fprintf(stderr, "Failed to initialize networking\n");
+        return 1;
+    }
+
     srand((unsigned)(time(NULL) ^ (unsigned)getpid()));
 
     ensure_data_dir();
     g_next_game_id = compute_next_game_id();
 
-    int server_fd = create_server_socket();
-    if (server_fd < 0) {
+    socket_t server_fd = create_server_socket();
+    if (server_fd == SOCKET_INVALID) {
+        net_cleanup();
         return 1;
     }
 
     ClientConn *clients = calloc(MAX_CLIENTS, sizeof(ClientConn));
     if (clients == NULL) {
         fprintf(stderr, "Failed to allocate client table\n");
-        close(server_fd);
+        SOCKET_CLOSE(server_fd);
+        net_cleanup();
         return 1;
     }
     for (int i = 0; i < MAX_CLIENTS; ++i) {
-        clients[i].fd = -1;
+        clients[i].fd = SOCKET_INVALID;
         clients[i].len = 0;
     }
 
@@ -1254,19 +1356,23 @@ int main(int argc, char **argv) {
         FD_ZERO(&read_set);
         FD_SET(server_fd, &read_set);
 
-        int max_fd = server_fd;
+#ifndef _WIN32
+        int max_fd = (int)server_fd;
+#else
+        int max_fd = 0;
+#endif
         for (int i = 0; i < MAX_CLIENTS; ++i) {
-            if (clients[i].fd >= 0) {
+            if (clients[i].fd != SOCKET_INVALID) {
                 FD_SET(clients[i].fd, &read_set);
-                if (clients[i].fd > max_fd) {
-                    max_fd = clients[i].fd;
+                if ((int)clients[i].fd > max_fd) {
+                    max_fd = (int)clients[i].fd;
                 }
             }
         }
 
         int ready = select(max_fd + 1, &read_set, NULL, NULL, NULL);
         if (ready < 0) {
-            if (errno == EINTR) {
+            if (NET_ERRNO() == NET_EINTR) {
                 continue;
             }
             perror("select");
@@ -1274,11 +1380,11 @@ int main(int argc, char **argv) {
         }
 
         if (FD_ISSET(server_fd, &read_set)) {
-            int client_fd = accept(server_fd, NULL, NULL);
-            if (client_fd >= 0) {
+            socket_t client_fd = accept(server_fd, NULL, NULL);
+            if (client_fd != SOCKET_INVALID) {
                 bool added = false;
                 for (int i = 0; i < MAX_CLIENTS; ++i) {
-                    if (clients[i].fd < 0) {
+                    if (clients[i].fd == SOCKET_INVALID) {
                         clients[i].fd = client_fd;
                         clients[i].len = 0;
                         added = true;
@@ -1286,25 +1392,26 @@ int main(int argc, char **argv) {
                     }
                 }
                 if (!added) {
-                    close(client_fd);
+                    SOCKET_CLOSE(client_fd);
                 }
             }
         }
 
         for (int i = 0; i < MAX_CLIENTS; ++i) {
-            if (clients[i].fd >= 0 && FD_ISSET(clients[i].fd, &read_set)) {
+            if (clients[i].fd != SOCKET_INVALID && FD_ISSET(clients[i].fd, &read_set)) {
                 handle_client_readable(&clients[i]);
             }
         }
     }
 
     for (int i = 0; i < MAX_CLIENTS; ++i) {
-        if (clients[i].fd >= 0) {
+        if (clients[i].fd != SOCKET_INVALID) {
             close_client(&clients[i]);
         }
     }
 
     free(clients);
-    close(server_fd);
+    SOCKET_CLOSE(server_fd);
+    net_cleanup();
     return 0;
 }
